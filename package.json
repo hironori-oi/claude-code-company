@@ -1,0 +1,10 @@
+{
+  "name": "claude-code-company",
+  "version": "1.0.0",
+  "description": "AI Organization Management Plugin for Claude Code - Virtual company with CEO, PM, Dev, Research, Marketing, Review, and Web Operations departments",
+  "type": "module",
+  "license": "MIT",
+  "scripts": {
+    "install-plugin": "node scripts/install.mjs"
+  }
+}
