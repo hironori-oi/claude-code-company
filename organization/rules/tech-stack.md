@@ -105,6 +105,49 @@
 - `className="dark"` を `<html>` に適用する方式
 - デフォルトは `system`（OS設定に追従）
 
+---
+
+## 標準アーキテクチャパターン（PRJ-002由来）
+
+### 1. データフェッチング＋キャッシュ（必須）
+全プロジェクトで以下のパターンを標準とする：
+- **SWRキャッシュ**: `cachedFetch()` でTTL内はAPI呼び出しゼロ。TTL切れは再取得してReact stateに反映
+- **同期初期値**: `cacheGetSync()` で `useState` 初期値にキャッシュを注入し、ローディングフラッシュを排除
+- **プリフェッチ**: ログイン後/テナント切替後に `requestIdleCallback` で全データを事前取得
+- **キャッシュ無効化**: 書き込み操作で `cacheInvalidateByPrefix()` を必ず呼ぶ
+
+### 2. 外部サービス連携（必須）
+ブラウザから外部サービスへの直接通信は禁止。必ずサーバーサイドプロキシを経由する：
+- **API Route プロキシ**: `/api/data/xxx` → サーバーサイドで認証情報を解決 → 外部API
+- **認証情報**: DB設定から `configId` で取得（ブラウザに認証情報を送信しない）
+- **例外**: 接続テスト（設定保存前）のみ直接config送信を許可
+
+### 3. マルチテナント設計（該当案件で必須）
+- **RLS**: 全テーブルで `ENABLE ROW LEVEL SECURITY` + テナントスコープポリシー
+- **UNIQUE制約**: 必ず `(カラム, tenant_id)` の複合UNIQUEにする（単体UNIQUEは禁止）
+- **ストレージ抽象化**: 最初から `async` インターフェースで設計（localStorage⇔Supabase切替可能）
+- **テナントストレージプロバイダー**: React Contextで `useTenantStorage()` を提供
+
+### 4. セキュリティ標準（必須）
+- **next.config.ts**: Strict-Transport-Security, X-Frame-Options, X-Content-Type-Options, Referrer-Policy, Permissions-Policy を設定
+- **API認証**: 全ルートで `requireAuth()` を呼ぶ。認証なしエンドポイントは禁止
+- **エラーハンドリング**: `apiError()` で構造化JSON出力。内部エラーメッセージをクライアントに漏洩させない
+- **Supabase Storage**: バケットRLSでテナント分離（パスプレフィックスベース）
+- **.env.local**: `.gitignore` で除外（.env.local.example にダミー値のみ記載）
+
+### 5. コードレビュー基準（必須）
+- **CRITICAL**: 本番ブロッカー（認証バイパス、データ漏洩、無制限リソース消費）
+- **HIGH**: 本番前に修正必須（エラーハンドリング不備、競合状態、N+1クエリ）
+- **MEDIUM**: 推奨修正（コード重複、型安全性、UX改善）
+- **LOW**: 軽微（コメント更新、スタイル統一）
+- CRITICAL/HIGHが残っている状態ではマージ不可
+
+### 6. DBマイグレーション運用（必須）
+- Phase番号付きの段階的マイグレーション（`data-migration-phaseN.sql`）
+- DEPLOYMENT.md にマイグレーション適用手順を記載
+- 本番適用前にステージングで動作確認
+- RLS無効化SQL（デバッグ用）は本番実行禁止の警告を明記
+
 ### デザイン原則
 - AI感が出すぎないクリーンなデザインを心がける
 - ミニマルだが温かみのあるデザイン

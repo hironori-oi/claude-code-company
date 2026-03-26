@@ -54,6 +54,30 @@
 - [ ] メール: `npm install resend` （メール送信が必要な場合）
 - [ ] ファイルアップロード: Supabase Storage or Vercel Blob の設定
 
+### Phase 6: セキュリティ・品質基盤（必須）
+- [ ] `next.config.ts` にセキュリティヘッダーを設定:
+  - Strict-Transport-Security, X-Frame-Options, X-Content-Type-Options
+  - Referrer-Policy, Permissions-Policy
+- [ ] API共通エラーハンドラー `apiError()` を作成（構造化JSONログ出力）
+- [ ] 全APIルートに `requireAuth()` を追加
+- [ ] `.env.local.example` にダミー値のみ記載（実際のキーを含めない）
+- [ ] `DEPLOYMENT.md` にマイグレーション手順・環境変数・確認事項を記載
+
+### Phase 7: パフォーマンス基盤（推奨）
+- [ ] SWRキャッシュユーティリティ `storage-cache.ts` を配置
+  - `cachedFetch()`: TTL内キャッシュ返却、TTL切れはAPI再取得
+  - `cacheGetSync()`: useState初期値用の同期読み出し
+  - `cacheInvalidateByPrefix()`: 書き込み操作時の無効化
+- [ ] テナントストレージプロバイダーにプリフェッチ処理を追加
+- [ ] 各ページのuseState初期値にcacheGetSync()を適用
+
+### Phase 8: マルチテナント（該当案件のみ）
+- [ ] 全テーブルに `tenant_id` カラムを追加
+- [ ] RLSポリシーをテナントスコープで設定
+- [ ] UNIQUE制約は必ず `(カラム, tenant_id)` の複合にする
+- [ ] ストレージインターフェースをasyncで設計
+- [ ] Supabase Storageバケットにテナント分離RLSを設定
+
 ## 環境変数テンプレート（.env.local.example）
 ```env
 # App
