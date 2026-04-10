@@ -342,3 +342,48 @@
 - **参照**:
   - オーナー報告: 「ジョブ管理でCSVダウンロードする際に表示される列の順番について、UI上に表示されているものと並びが異なる。修正を実施した列が一番下になってしまっている」
   - 関連コード: `job-detail-view.tsx:67 (columnOrder state)`, `job-detail-view.tsx:81-82 (template.defaultColumnOrder 取得)`, `extraction-results.tsx:324-334 (columnOrder による UI ソート)`, `csv-generator.ts:76-86 (getColumnNames 自然順)`
+
+## DEC-015: 抽出結果の編集でCSV列順が変動する問題の根治（決定的並び順の保証）
+- **日時**: 2026-04-11
+- **判断者**: CEO（オーナー承認のもと即実装）
+- **事象**:
+  - DEC-014 適用後も依然として、抽出結果を編集（editedValue 更新）すると CSV ダウンロードの列順が変化し、編集した列が末尾に回ってしまう
+  - オーナー要望: 「カラムの並び替えはユーザーがドラッグ&ドロップして変更した場合のみ変化するようにしたい」
+- **真因（3層構造）**:
+  1. **API GET の順不定**: `/api/data/jobs/results` GET が `.order("created_at", { ascending: true })` のみで副次ソートが無く、同一バッチで抽出された行（同じ `created_at`）は PostgreSQL 物理配置に従う。UPDATE 後に配置が揺らぐと並び順が変動
+  2. **convertPhysicalToLogicalOrder の残り列処理**: DEC-014 で追加したヘルパーは、`physicalOrder`（= `template.defaultColumnOrder`）に含まれない列を **`results` の出現順**で末尾追加していた。そのため、results の自然順が揺らぐと末尾の並びが変動
+  3. **`columnOrder` state の不完全性**: `job-detail-view.tsx` は `template.defaultColumnOrder` があればそれを使い、無ければ `fieldMappings` にフォールバックしていたが、**両者のマージを行っていなかった**。`defaultColumnOrder` に含まれない列（新規追加列等）は columnOrder に反映されず、残り列処理に落ちていた
+- **対策A（API層）: 決定的な ORDER BY**
+  - `api/data/jobs/results/route.ts` の GET に `.order("id", { ascending: true })` を副次ソートとして追加
+  - `id` は UUID PRIMARY KEY で行ごとに一意・不変のため、`created_at` が同時刻でも順序が決定的になる
+- **対策B（CSV層）: `convertPhysicalToLogicalOrder` の残り列を決定的にソート**
+  - 残り列（`physicalOrder` に含まれない列）を `results` 自然順ではなく **`columnPhysicalName` の昇順 → `columnName` の昇順** で並べるよう変更
+  - これで API の順不定が万一残っていても、末尾の並びは揺らがない
+- **対策C（UI層）: `columnOrder` state を template 情報でマージ構築**
+  - `job-detail-view.tsx` の初期化 useEffect を拡張し、`template.defaultColumnOrder` + `template.fieldMappings` + `template.tableRegion.columnMappings` の 3 ソースを順番にマージして **全列を含む完全な columnOrder** を構築
+  - 優先順位:
+    1. `defaultColumnOrder`（ユーザがドラッグ&ドロップで明示的に設定した順）
+    2. `fieldMappings` の sortOrder 順（API 側で `sort_order ASC` で取得済み）
+    3. `tableRegion.columnMappings` の `sort_order` 順
+  - これにより「残り列」が発生する経路自体を塞ぐ
+- **多層防御の意図**:
+  - A, B, C はそれぞれ独立して効くが、**C だけでも本件の症状は解消**する
+  - A は将来の別経路（例: ReExtract）で同様の順不定が顕在化しないための根底防御
+  - B は C で補完しきれない edge case（results にテンプレート外の列が混入するケース）の最終保険
+- **非対応（意図的）**:
+  - `template.defaultColumnOrder` を編集アクションで書き換える経路は **元々存在しなかった**（grep で確認済み。書き換えは `template-editor.tsx` の `ColumnOrderEditor` onSave のみ）。オーナーが見ていた症状は「`columnOrder` state の不完全性 + convertPhysicalToLogicalOrder の残り列処理の非決定性」の組み合わせによるもの
+- **影響ファイル**:
+  - `app/src/app/api/data/jobs/results/route.ts`（GET の副次ソート追加）
+  - `app/src/lib/export/csv-generator.ts`（`convertPhysicalToLogicalOrder` の残り列ソート変更）
+  - `app/src/components/jobs/job-detail-view.tsx`（columnOrder 初期化 useEffect の拡張）
+- **検証**:
+  - `npx tsc --noEmit` PASS
+  - オーナー実機確認: 抽出結果を編集しても CSV ダウンロード時の列順が変わらないこと、テンプレート側の ColumnOrderEditor で並び替えた場合のみ反映されることを確認
+- **観点別の妥当性**:
+  - **正しさ**: 3 層防御で各層が独立して機能する。1 層が失敗しても他層が救う
+  - **後方互換**: `convertPhysicalToLogicalOrder` のシグネチャは不変、呼び出し側は変更不要
+  - **localStorage モード**: `job-detail-view.tsx` の columnOrder 構築ロジックは template の形に依存するため、localStorage モードでも同様に動作
+  - **tableRegion あり（テーブル抽出）**: `tableRegion.columnMappings` まで拾うため BOTH モードでも列順が完全に構築される
+- **参照**:
+  - オーナー報告: 「抽出結果を修正すると修正したカラムがテンプレートで指定していたCSVエクスポートの並びから変更されている。ドラッグ&ドロップで変更した場合のみ変更されるようにしてほしい」
+  - 関連コード: `api/data/jobs/results/route.ts GET L113-118`, `csv-generator.ts convertPhysicalToLogicalOrder`, `job-detail-view.tsx:79-99 useEffect`, `template-editor.tsx:1092-1099 ColumnOrderEditor onSave`（並び替えの唯一の書き換え口）

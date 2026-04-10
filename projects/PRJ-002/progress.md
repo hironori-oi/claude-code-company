@@ -418,6 +418,20 @@
 - **検証**: `npx tsc --noEmit` PASS、オーナー実機確認 → テナント側に共有テンプレート表示確認済み
 - **オーナー作業完了**: Vercel デプロイ → SQL 修復 → 再配布テスト OK
 
+### 2026-04-11 (DEC-015: 抽出結果編集でCSV列順が変動する問題の根治)
+- **実施者**: CEO（直接実装）
+- **事象**: DEC-014 適用後も、抽出結果を編集すると CSV ダウンロードの列順が変動し、編集した列が末尾に回る
+- **真因（3層）**:
+  1. API GET `extraction_results` が `created_at` のみの ORDER BY で、同時刻行の並びが不定
+  2. `convertPhysicalToLogicalOrder` の残り列処理が `results` 自然順に依存
+  3. `job-detail-view.tsx` の columnOrder 構築が `defaultColumnOrder` と `fieldMappings` のマージになっていなかった
+- **対応内容**（DEC-015 参照）:
+  - A. `api/data/jobs/results` GET に `.order("id")` 副次ソート追加（順不定の解消）
+  - B. `convertPhysicalToLogicalOrder` の残り列を columnPhysicalName 昇順にソート
+  - C. `job-detail-view.tsx` の columnOrder 初期化で `defaultColumnOrder` + `fieldMappings` + `tableRegion.columnMappings` をマージして完全列順を構築
+- **検証**: `npx tsc --noEmit` PASS
+- **次のアクション**: オーナー実機確認 → 前回の review 指摘 (M-1 テスト / M-2 DEPLOYMENT.md 追記) 対応へ
+
 ### 2026-04-11 (DEC-014: ジョブ管理CSVダウンロードの列順をUI順に一致させる修正)
 - **実施者**: CEO（直接実装）
 - **事象**: ジョブ管理のCSVダウンロード時、UI 表示順と CSV の列順が異なり、編集した列が末尾に回る
