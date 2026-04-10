@@ -391,3 +391,15 @@
   - `projects/PRJ-002/app/README.md` - README
   - `projects/PRJ-002/progress.md` - 進捗100%更新
 - **ビルド確認**: npm run build 通過
+
+### 2026-04-11 (DEC-011: 共有テンプレート配布 UUID 構文エラー修正)
+- **実施者**: CEO（直接実装） / 後続で review 部門に差分レビュー依頼予定
+- **事象**: オーナーからの報告により、共有テンプレート配布時に `invalid input syntax for type uuid: "col_1775855165862_1_51o0n"` が発生して配布が失敗
+- **原因**: `distribute-manager.tsx` の一時ID (`col_*`) が `supabase-table-storage.setColumns` の再フェッチ失敗 → フォールバック経路 → `columnIdMap` 経由で `fieldMappings.columnId` に流出し、Postgres UUID 型カラムで構文エラー
+- **対応内容**（DEC-011 参照）:
+  - A. `api/data/tables/columns/route.ts` PUT が `TableDefinition` を返すよう拡張
+  - B. `lib/storage/supabase-table-storage.ts` `setColumns` が PUT レスポンスの `table` を優先利用
+  - C. `components/admin/distribution-manager.tsx` のフォールバック経路を Supabase モードで遮断、`fieldMappings` / `tableRegion.columnMappings` のマッピング失敗も Supabase モードでは throw
+  - D. `api/data/templates/mappings/route.ts` と `api/data/templates/table-region/route.ts` で `columnId` の UUID 形式バリデーション追加（`code: INVALID_COLUMN_ID`）
+- **検証**: `npx tsc --noEmit` PASS
+- **次のアクション**: オーナー環境で配布トグル再実行 → 正常動作確認 → review 部門に差分レビュー依頼

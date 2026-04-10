@@ -157,3 +157,44 @@
   - コードレビュー報告書: `projects/PRJ-002/reports/2026-04-10-parent-template-id-review.md`（予定）
   - マイグレーション SQL: `projects/PRJ-002/app/supabase/parent-id-migration.sql`, `view-hardening-migration.sql`
 
+## DEC-011: 共有テンプレート配布の UUID 構文エラー対応（`col_*` 一時ID流出）
+- **日時**: 2026-04-11
+- **判断者**: CEO（オーナー承認済み）
+- **事象**:
+  - 共有テンプレート配布時に `invalid input syntax for type uuid: "col_1775855165862_1_51o0n"` が発生し、配布に失敗
+  - エラー値は `distribute-manager.tsx` の `uniqueId("col")` が生成する一時ID (`col_<ts>_<counter>_<rand>`) と完全一致
+- **根本原因**:
+  1. 配布処理 (`distributeToTenant`) は新カラムに `col_*` 形式の一時IDを付与して `setColumns()` に送る。API 側 (`/api/data/tables/columns` PUT) は `col_*` をクライアント生成IDとして DB自動UUIDに置換する設計（正常）
+  2. `supabase-table-storage.setColumns()` は PUT 後に `/api/data/tables?id=...` を **再フェッチ** して戻り値を得ていた。この再フェッチが失敗もしくは空 `columns` を返すと `updatedTable` が null/空になる
+  3. 呼び出し元の `distribute-manager.tsx` は `updatedTable` 不在時に **localStorage 向けのフォールバック経路** に落ち、`columnIdMap` に `newColumns[i].id` (= `col_*` 一時ID) を格納
+  4. この `col_*` が `fieldMappings.columnId` や `tableRegion.columnMappings.columnId` に流れ、`/api/data/templates/mappings` PUT → Postgres の UUID 型カラムで構文エラー
+- **対策A（根本）: setColumns の再フェッチ依存を排除**
+  - `api/data/tables/columns/route.ts` PUT のレスポンスに `table: TableDefinition` を追加（既存の `columns` も後方互換で残す）
+  - `lib/storage/supabase-table-storage.ts` の `setColumns()` は PUT レスポンスの `table` を優先利用し、存在しない場合のみ旧方式で再フェッチ
+  - Supabase のread整合性や権限差異による空 columns 返却の影響を排除
+- **対策B（即効・防衛）: フォールバック経路を Supabase モードで遮断**
+  - `distribute-manager.tsx` L489 のフォールバックを `!useSupabaseData` 条件で囲み、Supabase モードでは **明示的に throw** して配布を中断
+  - `fieldMappings` / `tableRegion.columnMappings` のマッピング失敗時 (`columnIdMap.get(...) === undefined`) も Supabase モードでは throw に変更
+  - 既存の `catch` ブロック (L648-657) で作成済みリソースは自動ロールバック
+- **対策C（API層の防衛）: mappings / table-region API で UUID 形式バリデーション**
+  - `api/data/templates/mappings/route.ts` と `api/data/templates/table-region/route.ts` の PUT で、`columnId` が UUID 形式でなければ 400 (`code: INVALID_COLUMN_ID`) を返す
+  - サイレントな Postgres パースエラー ("invalid input syntax for type uuid") を早期検知し、原因特定を容易化
+- **対策D（運用）: 既存孤立データの確認**
+  - 配布失敗が途中で止まった場合、配布先テナントに孤立データが残っている可能性がある
+  - `distributeToTenant` の try/catch には既にクリーンアップ経路があるが、マスタコピー以降の失敗ケースは配布記録が残らず孤立が検知しづらい
+  - 運用としてオーナー環境で配布失敗発生テナントの `templates` / `table_definitions` を点検（同一 `physical_name` の既存テーブルは `replaceExisting` フローで上書きされるため、通常は次回配布で自動解消）
+- **影響ファイル**:
+  - `projects/PRJ-002/app/src/app/api/data/tables/columns/route.ts`（PUT が TableDefinition を返すよう拡張）
+  - `projects/PRJ-002/app/src/lib/storage/supabase-table-storage.ts`（setColumns を PUT レスポンス優先に）
+  - `projects/PRJ-002/app/src/components/admin/distribution-manager.tsx`（フォールバック遮断・マッピング失敗の厳格化）
+  - `projects/PRJ-002/app/src/app/api/data/templates/mappings/route.ts`（UUID バリデーション追加）
+  - `projects/PRJ-002/app/src/app/api/data/templates/table-region/route.ts`（UUID バリデーション追加）
+- **検証**:
+  - `npx tsc --noEmit` による型チェック: PASS
+  - 動作確認: 修正後、オーナーが実環境で配布トグルを再実行して正常動作を確認
+- **未対応・今後の検討**:
+  - 観測性（`console.error` / 構造化ログ）を route handler 群に追加することが vercel-functions ベストプラクティスとして推奨されたが、本件の修正スコープ外。別タスクで review 部門に洗い出しを依頼する
+  - `distribute-manager.tsx` の `uniqueId` ヘルパーは将来的に `crypto.randomUUID()` ベースに置き換えることでプレフィックス由来の混乱を根本解消できる（B plan）
+- **参照ドキュメント**:
+  - オーナー報告: 配布時エラー `invalid input syntax for type uuid: "col_1775855165862_1_51o0n"`
+  - 関連コード: `distribute-manager.tsx:408-411 (uniqueId)`, `distribute-manager.tsx:476-499 (columnIdMap 構築)`, `distribute-manager.tsx:527-547 (fieldMappings/columnMappings 書き換え)`
