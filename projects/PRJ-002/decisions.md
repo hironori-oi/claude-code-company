@@ -144,6 +144,15 @@
   - `view-hardening-migration.sql` を Supabase で実行
   - デプロイ後、一般ユーザアカウントで PATCH を叩いて 403 が返ることを検証
   - 中長期: `shared_by` フィールドの廃止 or 意味の一本化を検討（現状は parent_template_id と役割が重複気味）
+- **CRITICAL-2（バックフィル SQL のテナント越境リスク）に関する運用判断**:
+  - `parent-id-migration.sql` のバックフィル条件は `DISTINCT ON (name)` / `DISTINCT ON (physical_name)` で同名最古オリジナルを紐付ける実装。テナント境界の条件が欠落しており、テナント間で同名テンプレート・同一 physical_name が存在する場合に誤紐付けが発生しうる
+  - 本番では適用前に検証クエリ（同名が複数テナントに存在するか確認）を実行し、**0 行であることを確認した上で適用した**
+  - そのためSQLファイル自体は現状未修正。ただし **他環境（ステージング・ローカル等）で再適用する際は、必ず同じ検証クエリを事前実行すること**
+  - 将来、同じ改修を他プロジェクトに横展開する際は、バックフィル時点でテナントID結合条件を入れる or 既存の配布記録（`distribution_records` 等）から引くようにマイグレーション設計をやり直すこと
+- **PDF アップロード silent swallow の修正（2026-04-10 再レビュー MEDIUM-6）**:
+  - `supabase-template-storage.ts` / `supabase-shared-template-storage.ts` の `createTemplate` 内で PDF アップロード失敗を空 catch でスワローしていた問題を修正
+  - 修正方針: PDF アップロード失敗時は作成済みテンプレート本体を DELETE してから throw。呼び出し元の try/catch で自然にロールバックされる
+  - これにより「テンプレート本体は作成済みだが PDF だけ欠落した壊れた配布コピー」の発生を構造的に防止
 - **参照ドキュメント**:
   - コードレビュー報告書: `projects/PRJ-002/reports/2026-04-10-parent-template-id-review.md`（予定）
   - マイグレーション SQL: `projects/PRJ-002/app/supabase/parent-id-migration.sql`, `view-hardening-migration.sql`
