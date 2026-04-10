@@ -403,3 +403,20 @@
   - D. `api/data/templates/mappings/route.ts` と `api/data/templates/table-region/route.ts` で `columnId` の UUID 形式バリデーション追加（`code: INVALID_COLUMN_ID`）
 - **検証**: `npx tsc --noEmit` PASS
 - **次のアクション**: オーナー環境で配布トグル再実行 → 正常動作確認 → review 部門に差分レビュー依頼
+
+### 2026-04-11 (DEC-012: 配布コピーが配布先テナントで表示されない問題の修正)
+- **実施者**: CEO（直接実装） / review 部門に差分レビュー依頼予定
+- **事象**: 共有テンプレートの配布を実行しても、配布先テナントで `/templates` を開いても表示されない
+- **真因**: `/api/data/templates` POST (L484) と `/api/data/tables` POST (L392) の insert 句が `isShared: true` の場合に常に `tenant_id: null` を設定していたため、配布コピーもオリジナル扱いで tenant_id が NULL になり、テナント側一覧の `.eq("tenant_id", tenantId)` フィルタから除外されていた
+- **対応内容**（DEC-012 参照）:
+  - A. `/api/data/templates` POST と `/api/data/tables` POST の tenant_id ロジックを `isShared && !normalizedParent*` の両方を満たす場合のみ NULL、それ以外は tenantId を設定するよう修正
+  - B. 配布コピー作成時（`isShared=true` かつ `parent*Id` 指定あり）の tenantId 必須バリデーション追加
+  - C. tables POST の物理名重複チェック分岐を同じ判定ロジックに合わせて修正
+  - D. 新規 `supabase/dec-012-fix-distributed-tenant-id-migration.sql` 作成（既存 tenant_id=null な配布コピーを `distributions` 経由で UPDATE 修復）
+  - E. 新規 `supabase/dec-012-rls-tenant-isolation-migration.sql` 作成（`tenant_templates_select` / `tenant_tables_select` の `OR is_shared=true` を `OR (is_shared=true AND tenant_id IS NULL)` に引き締め）
+- **検証**: `npx tsc --noEmit` PASS
+- **オーナー作業**:
+  1. Vercel デプロイ完了を待つ
+  2. Supabase SQL エディタで `dec-012-fix-distributed-tenant-id-migration.sql` を実行
+  3. （任意）`dec-012-rls-tenant-isolation-migration.sql` を実行
+  4. 配布管理 UI から再配布を実行し、配布先テナントで `/templates` に表示されることを確認

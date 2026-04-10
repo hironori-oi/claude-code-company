@@ -198,3 +198,53 @@
 - **参照ドキュメント**:
   - オーナー報告: 配布時エラー `invalid input syntax for type uuid: "col_1775855165862_1_51o0n"`
   - 関連コード: `distribute-manager.tsx:408-411 (uniqueId)`, `distribute-manager.tsx:476-499 (columnIdMap 構築)`, `distribute-manager.tsx:527-547 (fieldMappings/columnMappings 書き換え)`
+
+## DEC-012: 配布コピーの tenant_id が NULL で保存され配布先テナントに表示されない問題の修正
+- **日時**: 2026-04-11
+- **判断者**: CEO（オーナー承認のもと即実装）
+- **事象**:
+  - 共有テンプレートを配布しても、配布先テナントでログインすると `/templates` にテンプレートが表示されない
+  - DEC-011 の配布処理修正でエラーなく配布が完了しても依然として見えない
+- **根本原因**:
+  - `/api/data/templates` POST (L484) と `/api/data/tables` POST (L392) のインサート句が、`isShared: true` のリクエスト全てに対して `tenant_id: body.isShared ? null : tenantId` として **tenant_id を NULL** に設定していた
+  - 配布処理は `createTemplate({ isShared: true, parentTemplateId: ..., ... })` を呼ぶため、配布コピーも同じ分岐を通り **配布先テナント ID ではなく NULL** で保存されていた
+  - 一方テナント側の一覧クエリは `.from("templates").eq("tenant_id", tenantId)` で厳密に tenant_id フィルタをかけるため、`tenant_id IS NULL` の配布コピーは **常に除外** されていた
+  - 旧実装は「オリジナル共有テンプレート（`tenant_id=null`）」だけを想定した分岐で、「配布コピー（テナント所有だが `is_shared=true`）」というケースを想定していなかった
+- **副次的問題**:
+  - RLS ポリシー `tenant_templates_select` / `tenant_tables_select` に `OR is_shared = true` の無条件可視条項があり、誤って全テナントの配布コピーがオリジナル扱いで見える状態だった（service_role 経由では表面化していなかったが、直接 DB 参照する将来クライアントに対する分離違反）
+- **対策A（アプリ層）**:
+  - `/api/data/templates` POST と `/api/data/tables` POST のインサート時に `isShared && !normalizedParent*` の **両方を満たす場合のみ tenant_id=null**、それ以外（配布コピー・通常テンプレート/テーブル）は tenantId を設定するよう修正
+  - 配布コピー作成時（`isShared=true` かつ `parent*Id` 指定あり）は **tenantId を必須** とするバリデーションを追加
+  - tables POST の重複チェックも同じ判定 (`isSharedOriginal`) に合わせて修正
+- **対策B（データ修復）**:
+  - 新規 SQL `supabase/dec-012-fix-distributed-tenant-id-migration.sql` を作成
+  - 既存の `parent_template_id IS NOT NULL AND tenant_id IS NULL` な配布コピーを `distributions` テーブルから配布先テナント ID を引いて UPDATE 修復
+  - 同様に `parent_table_definition_id IS NOT NULL AND tenant_id IS NULL` な配布テーブルコピーも修復
+  - 棚卸し用の事前/事後確認クエリと、`distributions` に紐付かない完全孤立行の削除クエリも（コメントアウトで）同梱
+- **対策C（RLS 引き締め・補助）**:
+  - 新規 SQL `supabase/dec-012-rls-tenant-isolation-migration.sql` を作成
+  - `tenant_templates_select` / `tenant_tables_select` の `OR is_shared = true` を `OR (is_shared = true AND tenant_id IS NULL)` に変更
+  - オリジナル共有テンプレート/テーブルのみ全テナントに公開し、配布コピーは自テナント所有のみ可視化
+  - 現行はアプリ層が service_role 経由なのでユーザ動作には影響しないが、将来の防衛策
+- **影響ファイル**:
+  - `app/src/app/api/data/templates/route.ts`（POST の tenant_id ロジック + バリデーション）
+  - `app/src/app/api/data/tables/route.ts`（POST の tenant_id ロジック + 重複チェック分岐 + バリデーション）
+  - `app/supabase/dec-012-fix-distributed-tenant-id-migration.sql`（新規・データ修復）
+  - `app/supabase/dec-012-rls-tenant-isolation-migration.sql`（新規・RLS 引き締め）
+- **検証**:
+  - `npx tsc --noEmit` による型チェック: PASS
+  - オーナーによる実機再配布動作確認 → 配布先テナントで「共有テンプレート」セクションに表示されることを確認
+- **実行順序（オーナー作業）**:
+  1. コードデプロイ完了を待つ
+  2. Supabase SQL エディタで `dec-012-fix-distributed-tenant-id-migration.sql` を実行（事前確認クエリで件数チェック → 本体 UPDATE → 事後確認で 0 行を確認）
+  3. 任意のタイミングで `dec-012-rls-tenant-isolation-migration.sql` を実行
+  4. 配布管理 UI から共有テンプレートを任意のテナントに再配布し、配布先テナントでログインして `/templates` に表示されることを確認
+- **未対応・今後の検討**:
+  - 配布処理末尾に `addRecord` の前で `getTemplate(newTemplate.id)` による実体検証を追加する案（将来の不整合予防）
+  - 配布管理 UI に「実体整合性チェック」機能を追加（孤立した配布レコードを検出・修復）
+  - 配布処理のログ（`console.info`）を各ステップに追加して原因特定を容易化
+  - 上記 3 点は次回の配布管理 UI 改善タスクと合わせて検討
+- **参照ドキュメント**:
+  - オーナー報告: 「共有テンプレートが配布先のテナントで表示されていませんでした」
+  - 関連コード: `/api/data/templates/route.ts:477-490 (旧 insert 句)`, `/api/data/tables/route.ts:386-398 (旧 insert 句)`, `distribute-manager.tsx:514-523 (createTemplate 呼び出し)`
+  - 関連マイグレーション: `parent-id-migration.sql` (DEC-008), `shared-templates-view.sql`, `data-migration-phase1.sql` (RLS), `data-migration-phase2.sql` (templates RLS)
