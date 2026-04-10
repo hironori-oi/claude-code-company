@@ -248,3 +248,9 @@
   - オーナー報告: 「共有テンプレートが配布先のテナントで表示されていませんでした」
   - 関連コード: `/api/data/templates/route.ts:477-490 (旧 insert 句)`, `/api/data/tables/route.ts:386-398 (旧 insert 句)`, `distribute-manager.tsx:514-523 (createTemplate 呼び出し)`
   - 関連マイグレーション: `parent-id-migration.sql` (DEC-008), `shared-templates-view.sql`, `data-migration-phase1.sql` (RLS), `data-migration-phase2.sql` (templates RLS)
+- **補足（2026-04-11 二次修正）: データ修復 SQL の型不整合対応**:
+  - オーナー実行時に `ERROR: 42883: operator does not exist: uuid = text` が発生
+  - 原因: `distributions` テーブルは `data-migration-phase4.sql` L106-110 で `template_id / table_id / copied_template_id / copied_table_id` を **TEXT 型** で定義している（localStorage 時代の ID 文字列を受け入れる歴史的事情）。一方 `templates.id` / `table_definitions.id` は UUID 型であり、PostgreSQL は `uuid = text` の暗黙型変換を行わないためエラーになる
+  - 対処: `dec-012-fix-distributed-tenant-id-migration.sql` の全ての比較箇所で `t.id::text = d.copied_template_id` / `td.id::text = d.copied_table_id` のように UUID → TEXT キャストに統一（本体 UPDATE 2 文 + 事前確認 JOIN + コメント内の DELETE クエリ）
+  - 冒頭に「型に関する注意」節を追加し、同じトラップを他プロジェクトに横展開しないよう記録
+  - アプリ側コードは無関係（型キャストはすべて SQL 内で完結）
