@@ -118,3 +118,33 @@
   - webhook-endpoints-migration.sqlのSupabase実行
   - PRJ-006デスクトップクライアントからの結合テスト
   - 精度検証（ブラウザ版とサーバー版の抽出結果比較）
+
+## DEC-008: 配布テンプレート紐付けを parent_template_id FK化、ON DELETE SET NULL を採用
+- **日時**: 2026-04-10
+- **判断者**: CEO（コードレビュー指摘を踏まえた判断）
+- **判断内容**:
+  - `templates.parent_template_id` / `table_definitions.parent_table_definition_id` を UUID FK として追加し、配布コピーと配布元オリジナルを明示的に紐付ける
+  - FK 制約は `ON DELETE SET NULL` を採用
+  - 配布処理は `createTemplate` / `createTable` の時点で親IDをアトミックに設定（2ステップの updateTemplate 呼び出しは廃止）
+  - parent フィールドの書き換えはシステム管理者限定とし、指し先が `shared_original_templates` ビューに実在することを API 層で検証
+- **背景**:
+  - 旧実装は `shared_by = 'system'` というハードコード文字列で配布コピーを判別し、`template_distribution_summary` ビューが **name ベースの JOIN** になっていた
+  - 同名オリジナルが複数テナントに存在する場合に誤カウントする構造的欠陥があり、PRJ-002 lessons-learned Problem-1 (CRITICAL) と同系統のリスク
+- **ON DELETE 方針の選択理由**:
+  - **採用: SET NULL** — 配布元オリジナル削除時に各テナントの配布コピー自体は温存し、FK のみ NULL にする。各テナントの運用データを巻き込み削除するリスクを回避
+  - 不採用: CASCADE — オリジナル削除でテナント側のデータが消えるのは事業上許容できない
+  - 不採用: RESTRICT — オリジナル削除時に全配布先で revoke してからでないと削除できない制約は、運用フロー（管理者の片付け作業）を煩雑化させる
+  - トレードオフ: 配布履歴（過去どのテナントに配布したか）はオリジナル削除時点で `template_distribution_summary` から消える。履歴が必要な場合は将来 append-only の `distribution_log` テーブル導入を検討
+- **セキュリティ強化**:
+  - API PATCH / POST で `parentTemplateId`, `sharedBy` の書き換えをシステム管理者限定
+  - 親 ID の整合性バリデーション（`shared_original_templates` ビュー経由で存在確認）
+  - 空文字列を自動的に NULL に正規化
+  - 関連ビューに `WITH (security_invoker = true)` を明示し、`anon` への GRANT SELECT を削除
+- **次のステップ**:
+  - `view-hardening-migration.sql` を Supabase で実行
+  - デプロイ後、一般ユーザアカウントで PATCH を叩いて 403 が返ることを検証
+  - 中長期: `shared_by` フィールドの廃止 or 意味の一本化を検討（現状は parent_template_id と役割が重複気味）
+- **参照ドキュメント**:
+  - コードレビュー報告書: `projects/PRJ-002/reports/2026-04-10-parent-template-id-review.md`（予定）
+  - マイグレーション SQL: `projects/PRJ-002/app/supabase/parent-id-migration.sql`, `view-hardening-migration.sql`
+
