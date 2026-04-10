@@ -301,3 +301,44 @@
 - **参照**:
   - オーナー依頼: 配布管理UIの複数テナント一括操作化 + 更新中表示 + 共有マスタバナー文言の修正
   - 既存統一文言: `column-editor.tsx:173` 「この共有テーブルは閲覧のみです」, `template-editor.tsx:972` 「この共有テンプレートは閲覧のみです」
+
+## DEC-014: ジョブ管理のCSVダウンロード列順をUI表示順に一致させる
+- **日時**: 2026-04-11
+- **判断者**: CEO（オーナー承認のもと即実装）
+- **事象**:
+  - ジョブ管理でCSVダウンロードすると、UI上に表示されている列順と CSV の列順が異なる
+  - 特に「編集を実施した列」が CSV では末尾に回ってしまう
+  - UI 側では `job-detail-view.tsx` が `template.defaultColumnOrder` を元に `columnOrder`（`columnPhysicalName` 配列）を計算して `JobFileResults` / `ExtractionResults` に渡しており UI 順は安定していた
+- **真因（3 点セット）**:
+  1. `job-detail-view.tsx` の `handleExport` が `options.columnOrder` と `options.mergeTableRows` を **generator に渡し忘れている**（旧: `generateCsvBlob({ results, encoding, delimiter, selectedColumns })` のみ）→ ダイアログで列順を並べ替えても反映されず、常に `results` の自然順で出力されていた
+  2. `ExportDialog` の初期 `columnOrder` が `getColumnNames(results)` で計算されており、これは `results` 配列の出現順（= 編集や再抽出で順序が変動しうる）でしかない → UI の `template.defaultColumnOrder` と独立した並びになっていた
+  3. `JobFileResults.handleExportFile`（行のクイック CSV ダウンロードボタン）も `columnOrder` を一切渡さず、`results` 自然順で出力していた
+- **副次的な不整合**: UI 側の `columnOrder` は `columnPhysicalName` 配列、CSV 側の `columnOrder` は `columnName`（論理名）配列で **列名の粒度が異なる**。そのため単純に流用できず、変換レイヤーが必要だった
+- **対策A: `csv-generator.ts` に変換ヘルパーを追加**
+  - `convertPhysicalToLogicalOrder(physicalOrder, results): string[]` を追加
+  - results から `columnPhysicalName → columnName` マップを構築し、UI 並びを CSV ヘッダ用論理名配列に変換
+  - `physicalOrder` に含まれない列は末尾に追加（results の出現順）
+- **対策B: `ExportDialog` に `initialColumnOrder` prop を追加**
+  - 渡された場合、ダイアログ初期 `columnOrder` として優先使用
+  - UI 順に含まれない列は末尾に fallback 追加
+  - 渡されない場合は従来通り `getColumnNames(results)` を使用（後方互換）
+- **対策C: `job-detail-view.tsx` の修正**
+  - `handleExport` で `options.columnOrder` と `options.mergeTableRows` を `generateCsvBlob` / `generateZipBlob` の両方に伝搬
+  - `convertPhysicalToLogicalOrder(columnOrder, results)` を useMemo で算出し、`initialExportColumnOrder` として `ExportDialog` に渡す
+- **対策D: `job-file-results.tsx` のクイックダウンロード修正**
+  - `handleExportFile` 内で props の `columnOrder`（`columnPhysicalName` 配列）を `convertPhysicalToLogicalOrder` で `columnName` 配列に変換し、`generateCsvBlob` に渡す
+- **非対応（dead code）**: `job-detail.tsx` は `jobs/[jobId]/page.tsx` から import されておらず未使用のため、本件では触らない
+- **影響ファイル**:
+  - `app/src/lib/export/csv-generator.ts`（変換ヘルパー `convertPhysicalToLogicalOrder` 追加）
+  - `app/src/components/export/export-dialog.tsx`（`initialColumnOrder` prop 追加 + useEffect 初期化ロジック更新）
+  - `app/src/components/jobs/job-detail-view.tsx`（import、handleExport、ExportDialog 呼び出し）
+  - `app/src/components/jobs/job-file-results.tsx`（import、handleExportFile）
+- **検証**:
+  - `npx tsc --noEmit` PASS
+  - オーナー実機確認: ダイアログを開いた時点で UI 順と同じデフォルト列順になり、編集した列が末尾に回らないことを確認
+- **非スコープ**:
+  - `results` 自体の自然順が編集時に変動する根本原因調査（`supabase-job-storage` の ORDER BY / editResult 実装）は今回のスコープ外。UI 順を明示的に渡すことで結果的に解消される
+  - 並び替えヘルパー `convertPhysicalToLogicalOrder` はダイアログ用の変換層として位置付け、将来 `ExtractionResultRecord` に `columnSortOrder` 等のフィールドを追加すれば不要化できる
+- **参照**:
+  - オーナー報告: 「ジョブ管理でCSVダウンロードする際に表示される列の順番について、UI上に表示されているものと並びが異なる。修正を実施した列が一番下になってしまっている」
+  - 関連コード: `job-detail-view.tsx:67 (columnOrder state)`, `job-detail-view.tsx:81-82 (template.defaultColumnOrder 取得)`, `extraction-results.tsx:324-334 (columnOrder による UI ソート)`, `csv-generator.ts:76-86 (getColumnNames 自然順)`

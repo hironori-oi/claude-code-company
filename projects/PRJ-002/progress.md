@@ -418,6 +418,22 @@
 - **検証**: `npx tsc --noEmit` PASS、オーナー実機確認 → テナント側に共有テンプレート表示確認済み
 - **オーナー作業完了**: Vercel デプロイ → SQL 修復 → 再配布テスト OK
 
+### 2026-04-11 (DEC-014: ジョブ管理CSVダウンロードの列順をUI順に一致させる修正)
+- **実施者**: CEO（直接実装）
+- **事象**: ジョブ管理のCSVダウンロード時、UI 表示順と CSV の列順が異なり、編集した列が末尾に回る
+- **真因**:
+  - `handleExport` が ExportOptions の `columnOrder` / `mergeTableRows` を generator に渡し忘れ
+  - `ExportDialog` の初期 columnOrder が results 自然順で初期化されていた
+  - `JobFileResults.handleExportFile` もクイックダウンロードで columnOrder を渡していなかった
+  - UI と CSV で columnOrder の粒度が異なる（columnPhysicalName vs columnName）変換層の欠如
+- **対応内容**（DEC-014 参照）:
+  - A. `csv-generator.ts` に `convertPhysicalToLogicalOrder` 変換ヘルパー追加
+  - B. `ExportDialog` に `initialColumnOrder` prop 追加、useEffect で UI 順を初期値として使用
+  - C. `job-detail-view.tsx` handleExport で columnOrder/mergeTableRows を generator に伝搬、ExportDialog に initialExportColumnOrder を渡す
+  - D. `job-file-results.tsx` handleExportFile で columnOrder を変換して渡す
+- **検証**: `npx tsc --noEmit` PASS
+- **次のアクション**: オーナー実機確認 → review 部門で DEC-011〜DEC-014 まとめてレビュー
+
 ### 2026-04-11 (DEC-013: 配布管理UIバッチ適用化 + 共有マスタ読み取り専用バナー統一)
 - **実施者**: CEO（直接実装） / review 部門に差分レビュー依頼予定
 - **依頼内容**:
