@@ -254,3 +254,50 @@
   - 対処: `dec-012-fix-distributed-tenant-id-migration.sql` の全ての比較箇所で `t.id::text = d.copied_template_id` / `td.id::text = d.copied_table_id` のように UUID → TEXT キャストに統一（本体 UPDATE 2 文 + 事前確認 JOIN + コメント内の DELETE クエリ）
   - 冒頭に「型に関する注意」節を追加し、同じトラップを他プロジェクトに横展開しないよう記録
   - アプリ側コードは無関係（型キャストはすべて SQL 内で完結）
+
+## DEC-013: 配布管理UIのバッチ適用UX化 + 共有マスタ読み取り専用バナーの文言統一
+- **日時**: 2026-04-11
+- **判断者**: CEO（オーナー承認済み・CEO推奨方針で進行）
+- **背景**:
+  - オーナーより 2 点の UI 改善要望
+  - (A) 配布管理 UI: トグルを押すたびに配布/取消が即座に走り、複数テナントを一括操作する際に時間がかかる → トグルはあくまで「希望状態の設定」とし、「変更を適用」ボタンでまとめて実行する UX に変える。更新中の視覚フィードバックを追加
+  - (B) テナント側で共有マスタを選択した時の読み取り専用バナーに「管理コンソールから編集できます」という文言が含まれているが、一般ユーザは管理コンソールの存在を知らないため混乱の元。テーブル・テンプレートと同じ「この共有XXXは閲覧のみです」という表現に統一
+- **対策A: 配布管理 UI のバッチ適用 UX 化**
+  - `TenantDistributionState` に `pendingDistributed: boolean`（トグル希望状態）と `lastError: string | null`（直近の適用失敗メッセージ）を追加
+  - トグル (`handleToggle`) は **即時実行せず `pendingDistributed` を更新するだけ**
+  - `changedStates` / `distributeList` / `revokeList` / `hasChanges` を useMemo で算出
+  - 新規「変更を適用」ボタンを追加。押下時、取消予定があれば一括確認ダイアログを表示してから `applyChanges()` を実行。取消が無ければそのまま実行
+  - 新規「変更を破棄」ボタン (`handleResetChanges`) を追加（保留状態を DB 状態に巻き戻し）
+  - `applyChanges()` は逐次実行。各テナントの処理前後に `updateTenantState` でスピナー ON/OFF、失敗時は `lastError` に記録。ヘッダの `progressLabel` に「更新中 (N/M): テナント名…」を表示
+  - 完了時は `toast.success` / `toast.warning` / `toast.error` で成功・失敗件数サマリーを表示し、`loadTenantStates()` で再同期
+  - 失敗したテナントは `pendingDistributed` のまま残るので、「変更を適用」再押下で**失敗分だけ自動リトライ**される
+  - `revokeFromTenant()` ヘルパーを抽出し、取消ロジックを `applyChanges()` と共通化
+  - 既存の `handleUpdateAll` は残し、相互排他ロック (`isAnyUpdating`) で同時実行を防止。ラベルを「全テナントを更新」→「**最新版で再配布**」に変更。こちらもプログレス表示とエラー行表示を追加
+  - Sheet の `onOpenChange` で **更新中は閉じさせない**（処理途中で閉じた場合のデータ不整合を防止）
+  - 各行に「配布予定（sky）」「取消予定（rose）」バッジを追加し、UI 上で変更予定を視覚化
+  - 各行に `lastError` があれば rose 色で表示し、どのテナントが失敗したか一目でわかる
+  - 旧の個別 revoke 確認ダイアログ (`revokeTarget`) は廃止。代わりに「変更を適用」押下時の**一括確認ダイアログ**を導入
+- **対策B: 共有マスタ読み取り専用バナーの文言・スタイル統一**
+  - `master-detail-panel.tsx` L136 の「共有マスタは読み取り専用です。管理コンソールから編集できます。」を「**この共有マスタは閲覧のみです**」に変更（テーブル `column-editor.tsx` L173 / テンプレート `template-editor.tsx` L972 と完全統一）
+  - バナーのクラスも `border-amber-500/20 bg-amber-500/5 px-6 py-2` → `border-amber-500/30 bg-amber-500/10 px-4 py-1.5`（テーブル・テンプレートと統一）
+  - `<p>` を `<span>` に変更し、`font-medium` を追加
+- **CEO意思決定（Q1〜Q3）**:
+  - Q1「全テナントを更新」ボタン → **残す**（再配布ニーズは別物）。ラベルを「最新版で再配布」に変更して役割を明確化
+  - Q2 取消時の確認ダイアログ → **一括適用直前に 1 回だけ**表示。取消予定件数を明示
+  - Q3 シート閉じ時の未適用変更 → **サイレント破棄**（次回開くと DB 状態でリセット）。ただし更新中は閉じさせない
+- **影響ファイル**:
+  - `app/src/components/admin/distribution-manager.tsx`（Component 本体を全面書き換え。`distributeToTenant` 関数はそのまま維持）
+  - `app/src/components/masters/master-detail-panel.tsx`（バナー文言とスタイルの統一、1 箇所）
+- **検証**:
+  - `npx tsc --noEmit` PASS
+  - `toast.warning` は sonner で動作確認（`user-list.tsx` での既存使用例あり）
+  - オーナー実機確認: 共有マスタのバナー文言変更、配布管理UIでの複数テナント一括適用・プログレス表示・失敗行リトライ動作を確認
+- **非スコープ（将来検討）**:
+  - 並列実行による高速化（Supabase 負荷・UX 複雑化の観点で見送り）
+  - bulk API エンドポイント化（ネットワーク往復削減）
+  - 配布処理末尾に `addRecord` 前の `getTemplate` 実体検証を追加
+  - 配布管理 UI に「実体整合性チェック」機能を追加
+  - 配布処理の `console.info` ログ追加
+- **参照**:
+  - オーナー依頼: 配布管理UIの複数テナント一括操作化 + 更新中表示 + 共有マスタバナー文言の修正
+  - 既存統一文言: `column-editor.tsx:173` 「この共有テーブルは閲覧のみです」, `template-editor.tsx:972` 「この共有テンプレートは閲覧のみです」

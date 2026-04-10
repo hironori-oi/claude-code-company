@@ -414,9 +414,30 @@
   - C. tables POST の物理名重複チェック分岐を同じ判定ロジックに合わせて修正
   - D. 新規 `supabase/dec-012-fix-distributed-tenant-id-migration.sql` 作成（既存 tenant_id=null な配布コピーを `distributions` 経由で UPDATE 修復）
   - E. 新規 `supabase/dec-012-rls-tenant-isolation-migration.sql` 作成（`tenant_templates_select` / `tenant_tables_select` の `OR is_shared=true` を `OR (is_shared=true AND tenant_id IS NULL)` に引き締め）
+  - F. 補足修正: 修復SQL内の UUID/TEXT 型不整合を `::text` キャストで解消（`distributions.copied_*_id` が TEXT、`templates.id` が UUID のため `operator does not exist: uuid = text` エラーが発生していた）
+- **検証**: `npx tsc --noEmit` PASS、オーナー実機確認 → テナント側に共有テンプレート表示確認済み
+- **オーナー作業完了**: Vercel デプロイ → SQL 修復 → 再配布テスト OK
+
+### 2026-04-11 (DEC-013: 配布管理UIバッチ適用化 + 共有マスタ読み取り専用バナー統一)
+- **実施者**: CEO（直接実装） / review 部門に差分レビュー依頼予定
+- **依頼内容**:
+  - (A) 配布管理UIでトグル操作するたびに即実行されるため、複数テナントへの一括操作に時間がかかる。トグルで希望状態を設定→「更新ボタン」で一括反映、更新中のプログレス表示を追加したい
+  - (B) テナント側で共有マスタを選択時の読み取り専用バナーに「管理コンソールから編集できます」とあるが、一般ユーザに管理コンソールの存在を伝えない方針のため、テーブル・テンプレートと同じシンプルな文言「この共有マスタは閲覧のみです」に統一したい
+- **対応内容**（DEC-013 参照）:
+  - A-1. `distribute-manager.tsx` Component 本体を全面書き換え。`TenantDistributionState` に `pendingDistributed` / `lastError` を追加し、トグル操作は即時実行せず保留状態を更新するだけに変更
+  - A-2. 「変更を適用 (N)」「変更を破棄」ボタンを追加。取消予定がある場合は一括確認ダイアログ
+  - A-3. 逐次実行＋ヘッダのプログレスラベル「更新中 (N/M): テナント名…」＋各行スピナー＋行ごとのエラー表示
+  - A-4. 完了時は `toast.success` / `toast.warning` / `toast.error` で成功・失敗件数サマリー
+  - A-5. 失敗した行は `pendingDistributed` のまま残り、再度「変更を適用」で失敗分だけ自動リトライされる
+  - A-6. 「全テナントを更新」ボタンは残しつつ相互排他ロック、ラベルを「最新版で再配布」に変更。プログレス表示・エラー行表示も追加
+  - A-7. 各行に「配布予定（sky）」「取消予定（rose）」バッジで変更予定を視覚化
+  - A-8. Sheet の onOpenChange で更新中は閉じさせない
+  - A-9. `distributeToTenant` 関数自体は変更なし（DEC-011 / DEC-012 の修正を維持）
+  - B-1. `master-detail-panel.tsx` のバナー文言を「共有マスタは読み取り専用です。管理コンソールから編集できます。」から「この共有マスタは閲覧のみです」に変更
+  - B-2. スタイルを `border-amber-500/30 bg-amber-500/10 px-4 py-1.5` に統一（`<p>` → `<span>` + `font-medium`）
+- **CEO 意思決定（Q1〜Q3）**:
+  - Q1: 「全テナントを更新」ボタン → 残す（役割が別物）
+  - Q2: 取消時の確認ダイアログ → 一括適用直前に 1 回だけ
+  - Q3: シート閉じ時の未適用変更 → サイレント破棄、ただし更新中は閉じさせない
 - **検証**: `npx tsc --noEmit` PASS
-- **オーナー作業**:
-  1. Vercel デプロイ完了を待つ
-  2. Supabase SQL エディタで `dec-012-fix-distributed-tenant-id-migration.sql` を実行
-  3. （任意）`dec-012-rls-tenant-isolation-migration.sql` を実行
-  4. 配布管理 UI から再配布を実行し、配布先テナントで `/templates` に表示されることを確認
+- **次のアクション**: オーナー実機確認 → review 部門に DEC-011 + DEC-012 + DEC-013 まとめてレビュー依頼
