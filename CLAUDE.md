@@ -29,6 +29,7 @@
 
 ### 2. 成果物ルール
 - 全ての成果物は `projects/{案件ID}/` 配下に保存する
+- **アプリケーション実体（ソースコード）は `projects/{案件ID}/app/` 配下に配置する** — Desktop 直下や workspace ルートにアプリを作らない。外部実体を取り込む場合は物理移動・submodule・junction のいずれかで `app/` 配下からアクセス可能にする（詳細: `organization/rules/project-setup-checklist.md` 最優先ルール）
 - 各部署のレポートは `projects/{案件ID}/reports/` に保存する
 - テンプレートに従ったフォーマットで出力する（`organization/templates/`参照）
 - 意思決定は必ず理由とともに `projects/{案件ID}/decisions.md` に記録する
@@ -71,19 +72,20 @@
 
 ## 標準技術スタック（概要）
 
-| カテゴリ | 技術 |
-|---------|------|
-| フレームワーク | Next.js (App Router) + TypeScript |
-| UI | shadcn/ui + Tailwind CSS |
-| テーマ | ダーク/ライト切り替え（next-themes） |
-| フォント | Geist Sans + Geist Mono |
-| DB | Supabase (PostgreSQL) / Neon（無料枠） |
-| 認証 | Supabase Auth |
-| ストレージ | Supabase Storage / Vercel Blob |
-| デプロイ | Vercel（GitHub自動デプロイ） |
-| AI | AI SDK + OpenAI / Ollama |
-| メール | Resend（必要時） |
-| テスト | Vitest + Playwright |
+| カテゴリ | Web | モバイル |
+|---------|-----|---------|
+| フレームワーク | Next.js (App Router) + TypeScript | Expo + React Native + TypeScript |
+| ルーティング | Next.js App Router | Expo Router |
+| UI | shadcn/ui + Tailwind CSS | React Native Reusables + NativeWind |
+| アイコン | Heroicons | @expo/vector-icons (Ionicons) |
+| テーマ | next-themes | useColorScheme() |
+| フォント | Geist Sans + Geist Mono | System Font |
+| DB | Supabase (PostgreSQL) / Neon | Supabase（Webと共有） |
+| 認証 | Supabase Auth | Supabase Auth（共有） |
+| ストレージ | Supabase Storage / Vercel Blob | Supabase Storage（共有） |
+| デプロイ | Vercel（GitHub自動デプロイ） | EAS Build → App Store / Google Play |
+| AI | AI SDK + OpenAI / Ollama | 同左（API呼び出し） |
+| テスト | Vitest + Playwright | Jest + Maestro / Detox |
 
 **詳細: `organization/rules/tech-stack.md`**
 
