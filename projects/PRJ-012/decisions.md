@@ -815,6 +815,51 @@
 
 ---
 
+## DEC-051: Preview Phase 4.1 を Rust `WebviewWindowBuilder` で実装（**新設 2026-04-22**）
+
+- **意思決定日**: 2026-04-22
+- **意思決定者**: CEO + オーナー
+- **決定内容**: v1.1 Preview 機能を Tauri 2 JS API `new WebviewWindow()` ではなく、**Rust 側 `WebviewWindowBuilder::data_directory(...)`** 経路で実装する (PM-944 採用)
+- **背景**:
+  - PM-943 で JS API spawn を試み、v1.1-dev で 7 hotfix (a927d7f → b675b7c) を積み上げた
+  - Windows 実機で `tauri://created` event は発火するが、`isVisible()` が `failed to receive message from webview` で reject、OS 上に window が表示されない症状が継続
+  - PM-942 §8 R3「Windows は multi-webview で user data dir 個別指定必須」が的中、JS API では `dataDirectory` option が公開されていない
+- **解法 (PM-944)**:
+  - `src-tauri/src/commands/preview.rs` で `spawn_preview_window` command 新設
+  - `WebviewWindowBuilder::data_directory($APPLOCALDATA/preview-webview/{label})` で WebView2 user data dir を label 固有に分離
+  - `build()` sync で OS window 生成、frontend は `invoke()` 1 呼出で成否判定
+  - 固定 label `preview-{projectId}` に回帰 (PM-943 hotfix3 の timestamp nonce 撤去)
+- **代替案と却下理由**:
+  - JS API 継続: 7 hotfix で root cause 未解消、JS API 側に `dataDirectory` 不在で根本的に不可能 → 却下
+  - 外部ブラウザ一本 (α 案): v1.0 と同じで v1.1 としての目玉が弱い → 却下
+- **実機検証結果**: 2026-04-22 オーナー確認、yahoo.co.jp / github.com 等の iframe 不可 URL が secondary window で表示成功
+- **関連**: PM-925〜936（iframe 試行と撤退）、PM-942（feasibility 調査、R3 的中）、PM-943（JS API 試行と 7 hotfix）、PM-944（Rust 実装）
+
+---
+
+## DEC-052: In-window Preview (案 D2) を v1.1 見送り（**新設 2026-04-22**）
+
+- **意思決定日**: 2026-04-22
+- **意思決定者**: CEO + オーナー（案 A 採用）
+- **決定内容**: Cursor 同等の **同一 window 内 multi-webview preview (案 D2)** は v1.1 では見送り、Tauri 2 の multi-webview API が stable 化するまで待機 (v1.2+ で再検討)
+- **背景**:
+  - DEC-051 (PM-944) で案 D1 別 window 方式が実動作することを確認
+  - オーナー質問「別 window ではなくアプリ内で表示できないか」に対し、Tauri 2 の in-window multi-webview は `unstable` feature flag 必須と判明
+- **見送り理由**:
+  - `tauri = { features = ["unstable"] }` を production ship するリスク (Tauri minor 更新で API breaking)
+  - PM-942 見積で工数 13〜17h、v1.1 release タイミングを遅延させる
+  - stability が Tauri community でも検証途上
+  - 現状の別 window 方式で実用 UX は確保 (任意 URL 表示可、X-Frame 制約も回避)
+- **代替案と却下理由**:
+  - B (unstable 採用で v1.1 に含める): 上記 risk で非推奨 → 却下
+  - C (別 window UX 改善 + v1.2+ で D2 本格): 部分的な v1.1 改善として候補だが、v1.1 release 優先のため見送り
+- **v1.2+ 申し送り**:
+  - Tauri 2.x で multi-webview が stable API 化するタイミングで再検討
+  - 別 window の position/size 記憶は v1.2 の UX 改善候補 (PM-945 相当)
+- **関連**: DEC-051（案 D1 採用）、PM-942（案 D1/D2 比較）
+
+---
+
 ## 今後の決定候補（v3.4 路線で更新）
 
 - **DEC-035**: monorepo 採用有無（M2 以降、複数パッケージが必要になった時点）
