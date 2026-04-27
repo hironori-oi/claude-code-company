@@ -860,6 +860,1415 @@
 
 ---
 
+## PM-957: 1 pane エディタで壁紙が前面に出て文字が見えない regression 修正（2026-04-23）
+
+### 背景
+- v1.3.1 時点で、エディタビューを 1 pane にすると壁紙しか見えず Monaco 本体が不可視になる症状をオーナーが再報告。
+- 2 pane / 4 pane では Monaco が正しく描画されていたため、PM-956（透過）系の修正では根治しないことが画像 2 枚（1 pane / 2 pane 同時比較）で確定。
+- DEC-045 hotfix4 までは「Monaco DOM が壁紙を透過しすぎて text が溶ける」と誤診していたが、真因は別。
+
+### 真因
+- `Shell.tsx` の viewMode 切替コンテナがエディタ/プレビュー分岐のみ `block` で、チャット/ターミナル分岐は `flex flex-col` だった。
+- SplitView の 1 pane 分岐は `flex min-h-0 flex-1 flex-col` を張っていたが、`flex-1` は親が flex container でないと効かない。`block` 親配下では高さが 0 に潰れる。
+- 一方 2 pane / 4 pane 分岐は `PanelGroup`（react-resizable-panels）が ResizeObserver で実測して inline `style="height:XXXpx"` を注入するため、block 親でも生存。
+- 結果として 1 pane だけ Monaco が `height: 5px` 以下に collapse し、壁紙 `html::before`（z-index -10, position:fixed）が唯一の可視レイヤになっていた。
+
+### 決定
+- **PM-957**: 以下 2 点を修正。
+  1. `components/layout/Shell.tsx`: エディタ/プレビュー viewMode コンテナを `block` → `flex flex-col` に変更（チャットコンテナと統一）。
+  2. `components/layout/SplitView.tsx`: 1 pane 分岐を `flex-1` → `h-full w-full` に変更し、親が flex かどうかに依存しない形へ補強。
+- 透過系 hotfix（FileEditor の rgba overlay / globals.css の Monaco transparent 強制）は残置。壁紙を透過させつつ読ませるデザイン要件はオーナーから「壁紙必須」で確定済。
+
+### 検証
+- `npx tsc --noEmit` PASS（型エラーなし）。
+- ロジック修正なし・CSS class のみの変更のため既存テスト影響なし。
+- 手動確認は実機（Tauri）で「1 pane にしてもエディタが描画されること」「2 pane / 4 pane 切替で regress しないこと」「プレビューも同様に潰れないこと」をオーナー側で実施。
+
+### 影響範囲
+- エディタ 1 pane 表示。
+- プレビュー 1 pane 表示（同じパターンだったため予防的に同修正）。
+- チャット / ターミナルはもとから `flex flex-col` だったため影響なし。
+
+---
+
+## PM-956 hotfix5: エディタ overlay 強度をターミナルに揃える（2026-04-23）
+
+### 背景
+- PM-957 で 1 pane 高さ潰れが解消し、エディタ文字が見えるようになった。
+- ただし hotfix4 の `rgba(0, 0, 0, 0.65)` + `backdrop-filter: blur(2px)` では壁紙の視認性が低く、オーナーから「ターミナルと同じ程度に」と要望。
+
+### 決定
+- `FileEditor.tsx` の overlay を `rgba(0, 0, 0, 0.55)` に変更し `backdrop-filter` を除去。
+- ターミナル (`--terminal-bg: rgba(0, 0, 0, 0.55)`) と完全に同じ overlay 強度に統一。
+
+### 影響
+- エディタ領域で壁紙の視認性が向上。
+- blur 除去により壁紙の質感（星空 / 人物シルエット等）が鮮明に。
+- text 可読性は PM-932 で検証済の 0.55 同値なので維持される前提（オーナー実機確認）。
+
+---
+
+## PM-958: 起動時に最大化表示（2026-04-23）
+
+### 背景
+- オーナーから「アプリが起動した際に全画面で開くように」との要望。
+- 従来は `1280 x 820` 固定で起動し、ユーザーが手動で最大化する必要があった。
+- 画面サイズが大きいモニタでは特に小さく感じられ、チャット / エディタ / ターミナルの 3 pane 構成が手狭。
+
+### 決定
+- `src-tauri/tauri.conf.json` の `app.windows[0]` に `"maximized": true` を追加。
+- `fullscreen` ではなく `maximized` を選択（タイトルバーとタスクバーを残す、一般的な「最大化」挙動）。
+- `width` / `height` / `minWidth` / `minHeight` は残置 — ユーザーが最大化解除 → 通常ウィンドウへ戻した時の復元サイズおよび最小サイズの制約として機能する。
+
+### 検証
+- JSON schema `https://schema.tauri.app/config/2` に準拠（`maximized` は `WindowConfig` の正式プロパティ）。
+- 次回 `cargo tauri build` / `cargo tauri dev` 時から有効。
+
+---
+
+## PM-959 / DEC-050: claude-code-company 固有要素を ccmux-ide-gui から完全撤去（2026-04-23）
+
+### 背景
+- DEC-027 で `ORGANIZATION_SLASHES` の hardcode 削除と `SlashPalette` の組織グループ UI 撤去は実施済。
+- しかし README / CHANGELOG / docs / 一部の production code に「claude-code-company」名称と組織ロール列挙が残存していた。
+- オーナーから「**完全な汎用 IDE を目指す** / claude-code-company を使いたい時は当該ディレクトリをプロジェクトとして開けば十分」との指示。
+- 徹底調査（Explore agent）で 5 ファイル・8 箇所の参照を特定。
+
+### 決定
+以下をすべて削除 / 汎用化した。
+
+| # | File | Before | After |
+|---|------|--------|-------|
+| 1 | `lib/stores/project.ts` | `defaultWorkspaceRoot()` が `~/Desktop/claude-code-company` hardcode を返す + `detectClaudeCodeCompanyProjects()` が `projects/PRJ-XXX/brief.md` を前提に走査 | 両関数を **完全削除**（どこからも呼ばれていないデッドコード）。未使用になった `homeDir` import も除去。コメントも「旧 Workspace」表現に。 |
+| 2 | `lib/types.ts` L126 | 「かつて: `claude-code-company` workspace 配下の 1 プロジェクト」 | 「かつて: 固定 workspace ルート配下の 1 プロジェクト」 |
+| 3 | `src-tauri/src/commands/builtin_slash.rs` L133 | 「claude-code-company の組織標準に準拠した最小 4 セクション」 | 「汎用 4 セクション構成 / Claude Code の hierarchical memory ルール」 |
+| 4 | `src-tauri/src/commands/slash.rs` L27 | 「claude-code-company 8 役のハードコード」 | 「特定組織ロール 8 役のハードコード」（撤去記録は保持） |
+| 5 | `README.md` L13-18, L174, L186-195, L235 | "組織運営統合" を差別化軸として明示 + 8 ロール列挙 + claude-code-company リンク（日英両方） | 「Claude Code エコシステム完全対応（slash/skill/plugin/MCP 自動検出、どんな組織体系でも動く）」に書き換え。credits の claude-code-company 行も除去。 |
+| 6 | `docs/release-checklist.md` L64, L102, L173, L227-228, L237 | "Organization workflow integration (/ceo /dev /pm)" / "organization/knowledge/..." / "PRJ-XXX tree navigation" | 「Full Claude Code ecosystem discovery」/ プロジェクト汎用表現に変更。リリース告知文の「claude-code-company と PRJ-012 の文脈含む」も除去。 |
+| 7 | `docs/screenshots/SCREENSHOTS-TODO.md` L72-73 | ProjectSwitcher のスクショ指定が "PRJ-001 〜 PRJ-012（claude-code-company 由来）" | 「登録済みプロジェクトの一覧」に汎用化。 |
+| 8 | `CHANGELOG.md` L65, L97, L149, L178 | 4 箇所で "組織運営統合は claude-code-company のメタ設計に基づく" | **全 4 行削除**（Credits 節から除去）。 |
+
+### 保持する参照（歴史記録 / 個人情報として妥当）
+- `LICENSE` 著作権表示 `Copyright (c) 2026 hironori-oi (improver.jp)`: 法的記載。
+- `src-tauri/Cargo.toml` authors email `ai-lab@improver.jp`: package 著作者情報。
+- `slash.rs` L27-33 の DEC-027 撤去記録コメント: 「旧版が組織ロールを hardcode していたが本リリースで削除済」という技術的文書として保持（"claude-code-company" 固有名は除去済、汎用的な「特定組織ロール」表現に変更）。
+
+### 検証
+- `npx tsc --noEmit` PASS（TypeScript 型エラーなし、未使用 import 除去済）。
+- `cargo check` PASS（Rust build OK、既存 3 warning のみ、いずれも本変更と無関係）。
+- `grep -ri "claude-code-company"` で production ソース / docs にヒットなし（LICENSE / Cargo.toml の著作者情報は意図的に保持）。
+
+### 影響
+- **アプリの挙動変化なし**: 削除した 2 関数はどこからも呼ばれていなかった。
+- **コンセプト明確化**: 「日本語ファースト + おしゃれな汎用 Claude IDE」として再定義。claude-code-company を使いたければ当該 directory を project 登録すれば、CLAUDE.md 自動ロードと slash/skill/MCP 自動検出で同等の体験が得られる。
+- **再発防止**: 今後 `/ceo` 等の組織ロール前提の UI / コードを書き足さない方針を明文化。
+
+---
+
+## PM-960 / DEC-051: A+C 併用 — cwd scope 完全撤去 + 組織コマンドのグローバル → プロジェクト移行（2026-04-23）
+
+### 背景
+- PM-959 で claude-code-company 固有参照を撤去したが、実機スクリーンショットで **`/ceo` が ai-company プロジェクトで "CWD" バッジ付きで表示される** regression をオーナーが発見。
+- 2 つの問題が同時発生していた:
+  1. `~/.claude/commands/` に置いた組織コマンド 11 個（`ceo`/`dev`/`pm`/`research`/`review`/`secretary`/`marketing`/`web-ops`/`status`/`report`/`new-project`）が **全プロジェクト横断** で表示されていた（Claude Code 仕様通りだが、オーナー意図「claude-code-company でのみ使いたい」と不一致）。
+  2. `src-tauri/src/commands/slash.rs` の **cwd chain scan** が process cwd から 5 階層上まで `.claude/commands/` を walk するため、`~/.claude/commands/` に到達して **global コマンドが "cwd" source に上書き** される label bug があった。
+
+### 決定（オーナー承認）
+**A + C 併用**:
+- **A: cwd scope を完全撤去** — desktop IDE では process cwd が意味を持たないため、Global / Project の 2 スコープに簡素化。
+- **C: 組織コマンド 11 個を claude-code-company/.claude/commands/ に集約** — claude-code-company を project として開いた時のみ表示されるようにする。
+
+### 実施内容
+
+#### Step C: ファイル移行（破壊的操作、慎重に段階実施）
+1. **事前検証**: `diff` で `~/.claude/commands/*.md` と `~/Desktop/claude-code-company/.claude/commands/*.md` の内容が **全 11 ファイル完全一致** を確認。移行ではなく**重複削除**で足りることが判明。
+2. **バックアップ**: `~/.claude/commands.backup-20260423-global-to-project-migration/` に 11 ファイルをコピー保持（復旧可能）。
+3. **グローバル側削除**: `~/.claude/commands/` の 11 ファイルを削除。プロジェクト側（claude-code-company）は既存維持で何も触らない。
+4. **検証**: 両ディレクトリの最終状態を ls で確認。
+
+#### Step A: cwd scope 廃止（コード修正）
+- **`src-tauri/src/commands/slash.rs`**:
+  - `scan_all` から cwd chain block（5 階層 walk）を完全削除。
+  - `list_slash_commands` から `std::env::current_dir()` 取得を削除、引数は `project_path` のみ。
+  - `source_rank`: `"cwd" => 0, "project" => 1, "global" => 2` → `"project" => 0, "global" => 1`。
+  - `SlashCmd.source` doc を `"global" | "project"` に限定。
+  - 未使用になった `use std::path::PathBuf` import を削除。
+  - Tests: `scan_all_cwd_overrides_global` / `source_rank_orders_cwd_first_...` を `scan_project_and_global_are_independent` / `source_rank_orders_project_first_then_global` に置換。
+- **`src-tauri/src/commands/skills.rs`**:
+  - slash.rs と同じパターンで cwd chain 削除。`list_skills` も project_path のみを受ける。
+- **`src-tauri/src/commands/memory_tree.rs`**:
+  - `Scope` enum から **dead variant `Cwd` を削除**（scan 処理で一度も emit されていなかったゾンビ）。
+- **`lib/types.ts`**:
+  - `SlashCmd.source`、`SkillDef.source` を `"global" | "project"` に。
+  - `TreeNode.scope` から `"Cwd"` を削除。
+- **`components/palette/SlashPalette.tsx`**:
+  - `SCOPE_META.cwd` エントリ削除、`SCOPE_ORDER` から `"cwd"` 除去、`GroupedItems.cwd` フィールド削除、`groupAndLimit` の初期化と合計件数計算も更新。
+- **`components/inspector/MemoryTreeView.tsx`**:
+  - `GroupKey` 型から `"Cwd"` 削除、`GROUP_LABEL`/`openGroups` 初期化/grouping ロジックを 2 scope (Global / Project) に簡素化。
+- **`tests/e2e/fixtures.ts`**:
+  - `slashCommands.source` 型から `"cwd"` 削除。
+- **`docs/release-checklist.md`**:
+  - `CLAUDE.md 3-scope (Global / Project / Cwd)` → `2-scope (Global / Project, including Parent fallback)` に修正。
+
+### 検証
+- `npx tsc --noEmit` → **PASS**（exit 0）
+- `cargo test --lib` → **138 passed; 0 failed**
+  - `slash::tests::source_rank_orders_project_first_then_global` ✓
+  - `slash::tests::scan_project_and_global_are_independent` ✓
+  - `skills::tests::source_rank_matches_slash_rule` ✓
+- `cargo check` → **PASS**、`Cwd` variant の dead_code warning 消滅（既存 2 warning のみ残存、本件と無関係）。
+
+### 期待される挙動
+- ai-company など claude-code-company 以外のプロジェクトでは `/ceo` 他の組織コマンドは **一切表示されない**。
+- claude-code-company を project として開くと、`.claude/commands/` 内の 13 ファイル（aidesigner + 11 組織ロール + CLAUDE.md）が "PROJECT" バッジで表示される。
+- CLAUDE.md Inspector は Global / Project の 2 グループ accordion（旧 "カレント (cwd)" グループは消滅）。
+
+### 復旧手順（万一の不具合時）
+- `~/.claude/commands.backup-20260423-global-to-project-migration/*.md` をコピーで `~/.claude/commands/` に戻せば復旧。ただし戻した後も slash.rs の cwd scope が廃止されているため、"GLOBAL" ラベルで全プロジェクトに表示される状態になる。
+
+### 影響範囲
+- **破壊的変更**: 旧 "cwd" source / "Cwd" scope に依存していたコードは型エラーとして検出済（既に全箇所修正）。
+- **ユーザー影響**: `~/.claude/commands/` に他の global コマンドを配置している場合は引き続き "GLOBAL" として表示される（本変更は cwd だけを対象、global は維持）。
+
+---
+
+## PM-961 / DEC-052: ccmux-ide 公式サイト（landing + docs）構築（2026-04-23）
+
+### 背景
+- オーナー要望で `https://shin-sibainu.github.io/ccmux/` + `/docs/` のような公式サイトを ccmux-ide 用に構築。
+- GitHub Pages 上で landing page + docs 5 ページを提供し、Releases への導線 / 機能紹介 / 使い方説明を一元化する。
+
+### 決定
+- **配置**: `ccmux-ide-gui/site/` を **独立した Next.js 15 App Router プロジェクト** として追加（親の Tauri アプリとは `node_modules` 非共有）。
+- **スタック選定**: Nextra を採用せず、主アプリと同じ **Next.js 15 + Tailwind CSS + TypeScript + framer-motion + lucide-react + next-themes** で統一。デザインシステムを共有し、バンドル軽量化 + 完全カスタム。
+- **静的書き出し**: `output: 'export'`, `basePath: '/ccmux-ide'`, `assetPrefix: '/ccmux-ide/'`, `trailingSlash: true`（GitHub Pages `/docs/` ルーティング互換）。
+- **配信**: `.github/workflows/deploy-site.yml`（新規）で push to main 時 `site/**` 変更を検知し `actions/deploy-pages@v4` でデプロイ。ワンタイム設定として Settings → Pages → Source: GitHub Actions が必要。
+- **日本語ファースト**: 全ページ日本語。英語版ミラーは将来拡張（MVP では不要）。
+- **ブランド**: Claude Orange (`hsl(18 55% 50%)`) アクセント + zinc/stone ニュートラル + Geist Sans/Mono + `◆` ロゴグリフ。ダークモード default（code-editor-like）。
+
+### 生成物
+- **landing**: `/` — Nav / Hero / Features grid (6 cards) / Compare table / Why pillars (3) / Install grid (3 OS) / Closing CTA / Footer。
+- **docs**: `/docs/` + `getting-started` + `features` + `keybindings` + `architecture` の 5 ページ。左 Sidebar + 本文 + 右 ToC レール。
+- **Components 12 個**: Hero, FeaturesGrid, CompareTable, WhyPillars, InstallGrid, ClosingCTA, Footer, SiteHeader, DocsSidebar, DocsLayout, ThemeProvider, ThemeToggle。
+- **CI**: `.github/workflows/deploy-site.yml`（2 job: build → deploy-pages）。
+
+### 検証
+- `cd site && npm install && npm run build` → 成功（warning / error なし）。
+- Landing route: **42.2 kB route / 148 kB First Load JS**（framer-motion 同梱のため）。
+- Docs pages: 各 770 B route / 107 kB First Load JS。
+- Shared: 102 kB。総静的ファイル ~1.6 MB。
+- 生成された `site/out/` に `index.html`（landing）/ `docs/index.html` + 4 subpages（docs）/ `404.html` / `_next/` assets。
+- Hero コピー `Claude Code を、デスクトップで、美しく。` が HTML 出力に正しく含まれる（mojibake なし）。
+- basePath 確認: CSS / JS asset URL がすべて `/ccmux-ide/_next/...` で始まる。
+- `.nojekyll` を `public/` に静的配置 + workflow で `touch out/.nojekyll` の二重防衛。
+
+### 既知の placeholder / 残課題
+1. **SHA256 ハッシュ**: `InstallGrid.tsx` は TBD。初回 Release の asset hash 確定後に埋める。
+2. **スクリーンショット**: `/docs/features` 内に `TODO: スクリーンショット` コメント。Welcome Wizard / streaming chat / DiffEditor の 3 枚が欲しい。
+3. **OG 画像 / favicon**: `public/og.png` / `public/favicon.ico` 未配置。メタデータはテキストのみ。
+4. **英語版ミラー**: 未対応（MVP 優先）。
+
+### 次のアクション（オーナー手動）
+1. GitHub → Settings → Pages → Source → **GitHub Actions** に切替（1 回のみ）。
+2. `site/` と `.github/workflows/deploy-site.yml` をコミットし main に push → workflow が自動デプロイ、`https://hironori-oi.github.io/ccmux-ide/` で公開。
+3. SHA256 / screenshots / og.png / favicon を順次補充（非ブロッカー）。
+
+### 影響範囲
+- 破壊的変更なし（新規 subdirectory + 新規 workflow のみ）。
+- 親 Tauri アプリのビルド / 既存 workflow には影響なし（`site/**` と `.github/workflows/deploy-site.yml` のみが trigger）。
+
+---
+
+## PM-962 / DEC-053: Sumi (墨) ブランドアイデンティティ確定（2026-04-23）
+
+### 背景
+- ccmux-ide を製品として成立させるための正式リネーム + ブランド確立（DEC-029 / DEC-041 の具体化）。
+- 既存の `◆` グリフ + 「ccmux-ide」ワードマークは仮置き。職人的で静謐な和のトーンを核に据えた新アイデンティティが必要。
+
+### 決定
+- **製品名**: `ccmux-ide` → **Sumi (墨)**
+- **ブランド哲学**: 「墨の哲学 × モダンテック」。属性優先順位 = 侘寂 > 静謐 > 職人的 > 濃密。
+- **ロゴ方向**: 3 案（A: 円相 + 滴 / B: 墨字ミニマル化 / C: 一筆 + 墨滴）のうち **C 案を採用**。
+- **カラー**: Claude Orange (`hsl(18 55% 50%)`) を CTA / focus 専用のアクセントとして保持し、主パレットを sumi.ink / charcoal / ash / mist / paper の墨色 5 段に置換。status 色は enso (gold) / chigiri (red)。70/20/10 ルール（墨 70% / 和紙 20% / orange 10%）。
+- **タイポ**: Geist Sans / Mono 継続。和文強調は serif ではなく tracking で表現（`tracking-[0.2em]`）。Noto Serif JP 等の和文 serif は不使用。
+- **アセット配置**: すべて `site/public/brand/` 配下。`src-tauri/icons/*` は **本 PR では触らない** — ブランド切替は別コミット。
+
+### C 案採用理由（A / B の棄却理由を含む）
+- **C 案の強み**: (1) 16px favicon まで崩れない — 一本線 + ドットは圧縮に強い。(2) 世界市場で識別可能 — 漢字読解に依存しない。(3) "pro designer" シグナル最強 — かすれ (kasure) の表現そのものが職人技。(4) 「決定的な一筆」のメタファーが IDE のコード決定行為と符合。
+- **A 案（円相 + 滴）棄却**: 瞑想 / メンタル系アプリで既視感が強い、ジェネリックに見える。
+- **B 案（墨字ミニマル化）棄却**: 漢字非読者に「読めない落書き」と映るリスク、12 画の簡略化で個性が失われる trade-off が悪い。
+
+### 生成物
+- **SVG 6 本**: `logo.svg` / `logo-dark.svg` / `logo-light.svg` / `logo-mark-{dark,light}.svg` / `logo-wordmark-{dark,light}.svg` — すべて手書き最適化、`<title>` / `<desc>` 付与、`currentColor` 対応。
+- **アプリアイコン**: `app-icon-1024.svg`（master）+ 32/64/128/128@2x/256/512/1024 PNG（`scripts/generate-icons.mjs` で sharp 経由生成）。
+- **favicon**: `public/favicon.ico`（png-to-ico）+ `public/icon.svg`（Safari mask-icon 対応、16px 向け簡略版）。
+- **OG 画像**: `public/brand/og.svg` + `og.png`（1200×630）。
+- **BRAND.md**: `public/brand/BRAND.md` — logo / color / type / voice / do-don't / icon 生成 / motion を網羅。
+- **サイト反映**: `SiteHeader` / `Hero` / `Footer` / `layout.tsx` metadata / `tailwind.config.ts` を更新。hero コピーを `Claude Code を、墨でしたためる。` に差替。`<Logo />` / `<Wordmark />` コンポーネント新設。
+
+### 検証
+- `npm run build` 成功（warning なし、/ route 148 kB First Load JS、従前と同等）。
+- `out/index.html` に `墨でしたためる` / `Sumi` 両方が含まれることを確認。
+- `src-tauri/icons/*` のタイムスタンプが 4月18日のまま = 未変更を確認。
+
+### 非ブロッカー残課題
+1. `src-tauri/icons/*` への実際のアイコン反映（BRAND.md §6 のマッピング通りに次回 PR）。
+2. Tauri アプリ名 / productName の `Sumi` 変更（`tauri.conf.json` / package metadata）。
+3. リポジトリ名自体 `ccmux-ide` → `sumi` 変更は DEC-041 の範囲で別途。
+
+---
+
+## PM-963 / DEC-054: アプリ本体 ccmux-ide → Sumi リネーム + migration（2026-04-23）
+
+### 背景
+- DEC-053 で Sumi ブランドを確定、web サイトは反映済（PM-961）。
+- 残課題: アプリ本体（Tauri バイナリ / Rust crate / npm package / OS keyring / localStorage）の実リネーム。
+- **6 release 実配布済** (v1.0.0〜v1.3.1) により ID 変更は既存ユーザーの資産に影響するため migration shim が必要。
+
+### 決定
+**「アプリ本体のみ改称、repo 名は据え置き」** の段階移行戦略。transparent migration で既存ユーザーの資産を引き継ぐ。
+
+### 実施内容
+
+#### A. アイコン再生成
+- `npx @tauri-apps/cli icon site/public/brand/app-icon-1024.png` で `src-tauri/icons/` 配下の全 40+ アイコン（desktop / iOS / Android）を Sumi ブランドで再生成。
+- 128x128.png が一筆ブラシ + 橙の墨滴の新デザインで生成されたことを目視確認。
+
+#### B. 中核 identity 変更
+| ファイル | 変更 |
+|---------|------|
+| `src-tauri/tauri.conf.json` | `productName` `ccmux-ide` → `Sumi`, `identifier` `jp.improver.ccmux-ide` → `jp.improver.sumi`, window title `ccmux-ide` → `Sumi`, `assetProtocol.scope` に `$HOME/.sumi/**` 追加（`.ccmux-ide-gui/` も互換残置） |
+| `src-tauri/Cargo.toml` | `name` `ccmux-ide` → `sumi`, `[lib] name` `ccmux_ide_lib` → `sumi_lib` |
+| `src-tauri/src/main.rs` | `ccmux_ide_lib::run()` → `sumi_lib::run()` |
+| `package.json` | `name` `ccmux-ide` → `sumi` |
+
+repo URL `hironori-oi/ccmux-ide` は据え置き（updater endpoint 継続利用）、repo 名変更は DEC-041 で別追跡。
+
+#### C. Transparent migration shim（既存ユーザー資産保護）
+
+**1. OS Keyring（API Key 保管）** — `src-tauri/src/commands/config.rs`:
+- `KEYRING_SERVICE` `"ccmux-ide"` → `"sumi"`、`LEGACY_KEYRING_SERVICE: "ccmux-ide"` 定数追加
+- `load_api_key()` で新 service 空 → 旧 service 参照 → 見つかれば新に書き込み + 旧削除する `migrate_legacy_api_key()` 実装
+- v1.3.x で保存した API Key が v1.4+ で自動移行、ユーザー再入力不要
+
+**2. localStorage project registry** — `lib/stores/project.ts`:
+- `PROJECT_REGISTRY_STORAGE_KEY` `"ccmux-project-registry"` → `"sumi-project-registry"`、`LEGACY_PROJECT_REGISTRY_KEY` 定数追加
+- `safeStorage` の `getItem` を override し、新 key 未存在 + 旧 key 存在時に transparent コピー + 旧削除
+- zustand persist の初回 rehydrate でマイグレーション後データを読めるため state 空初期化を回避
+
+**3. localStorage settings** — `lib/stores/settings.ts` + `lib/apply-accent.ts`:
+- 新 key `"sumi:settings"` に変更、旧 `"ccmux-ide-gui:settings"` からの transparent 移行
+- 起動時早期の同期読みは新 → 旧の順で fallback
+
+#### D. CI workflow artifact 名
+- `build-windows.yml`: `ccmux-ide-{nsis,msi,portable}` → `sumi-{nsis,msi,portable}`, binary path を `sumi.exe` + `Sumi.exe` glob
+- `release.yml`: artifact 名 / download pattern を `sumi-*` に
+- `e2e.yml` / `deploy-site.yml`: コメントヘッダ更新
+
+#### E. コメント / doc 整合
+- `src-tauri/src/lib.rs` header → 「Sumi Tauri backend entrypoint」、upstream credit を `ccmux by @Shin-sibainu` に正確化
+- `README.md` 日英両セクションを Sumi 名義に、installer ファイル名 `Sumi_0.1.0_*` 表記、命名変遷の脚注追加
+- `tsconfig.json`: pre-existing バグ修正で `site/` を exclude 追加
+
+### 検証
+- `npx tsc --noEmit` → **PASS**（exit 0）
+- `cargo test --lib` → **138 passed; 0 failed**
+- `npm run build` → **PASS**（静的 export、4 route、warning/error なし）
+- `grep "ccmux_ide_lib\\|jp.improver.ccmux"` → ヒットなし（内部識別子完全置換確認）
+
+### Breaking changes
+1. **Bundle identifier 変更** で v1.3.x からの auto-update は切断。ユーザーは手動で Releases から Sumi 版をダウンロードする必要あり。Release notes で明示する。
+2. **install path 変更**（Windows %LOCALAPPDATA%\\ccmux-ide → \\Sumi）: 旧バージョン共存可能、アンインストールは手動。
+3. **~/.ccmux-ide-gui/ config dir** は引き継がない（初回起動は clean state）。ただし localStorage + keyring の transparent migration で API Key / 設定 / project 一覧は引き継がれる。
+
+### 後続タスク（非ブロッカー）
+- v1.4.0 Release Notes に改称告知 + 手動 DL 案内
+- DEC-041 実施時に updater endpoint URL 更新 + repo redirect 運用
+- `src-tauri/icons/Square*Logo.png` は Tauri bundle 未参照の dead asset、次期 clean up で削除可
+
+---
+
+## PM-964: ブランド UI 重複解消 + エディタタブ切替バグ修正（2026-04-23）
+
+### 背景
+オーナー実機確認で発見:
+1. 画面左上に「Sumi」が 3 つ並んで重複感: (a) OS ウィンドウタイトルバー, (b) アプリ内 TitleBar + Sparkles ✦ アイコン, (c) Sidebar の `Sumi` ラベル。
+2. TitleBar 左の Sparkles アイコンが OS ウィンドウアイコン（同じ位置にあるアプリアイコン）と視覚的に競合。
+3. **エディタタブを左クリックしてファイル切替しようとするとドロップダウン（保存 / 閉じる / 他のタブを閉じる）が開き、切替不能**の regression。
+
+### 決定
+1. **Sidebar 内の `Sumi` ラベル削除** — TitleBar 側に残して 1 箇所に集約。collapsed 時の空 header は collapse toggle ボタンのみ残す。`AnimatePresence` 未使用化で import も削除。
+2. **TitleBar の `Sparkles` アイコン削除** — OS アプリアイコンと重複するため。テキスト「Sumi」のみ残す。未使用 import も除去。
+3. **エディタタブ左クリックをドロップダウンから切替に戻す** — 根因は `DropdownMenuTrigger asChild` で tab div を包んでいたため全クリックが menu 起動を奪っていた。`DropdownMenu*` コンポーネント一式を削除し、純粋な `<div role="tab">` に戻す。閉じる導線は既存の X ボタンと **middle-click（`onAuxClick` で button===1）** を維持。保存は Ctrl+S（FileEditor の `addCommand` で登録済）で引き続き可能。
+
+### 影響
+- **UI 密度向上**: 左上ブランド表示が 1 → 1（OS 含めれば 2）に正規化、視覚ノイズ低減。
+- **エディタ UX 回復**: タブ切替が直感通り動作。
+- **失われた機能**: 右クリック / タブクリックから開けた「他のタブを閉じる」アクション。必要なら将来 `@radix-ui/react-context-menu` を追加して右クリック専用メニューとして再導入する（現状は運用影響小と判断）。
+
+### 検証
+- `npx tsc --noEmit` → PASS（exit 0）
+- 実機動作はオーナー側で確認。
+
+---
+
+## PM-966 / DEC-055: Claude Agent SDK の settingSources + cwd 明示で Cursor 相当の context 理解を実現（2026-04-23）
+
+### 背景
+オーナー実機検証で判明:
+1. claude-code-company を Sumi でプロジェクト指定 → チャットで "PRJ-012 の sumi ウェブページを確認して" と依頼 → Claude が「どのディレクトリですか？絶対パスを教えて」と返答。**CLAUDE.md / プロジェクト構造が一切読まれていない**。
+2. `/ceo` スキルが SlashPalette に表示されるのに、呼び出すと Claude が「そのスキルは登録されていません」と返答。
+3. Claude のプロンプトで自身の cwd を「`C:\Program Files\Sumi\…`」のような Sumi インストールディレクトリだと認識している。
+
+### 根因（3 層）
+Explore agent による sidecar / Rust / SDK 型定義の徹底調査で以下が確定:
+
+#### 1. **cwd が毎回のプロンプトで SDK に渡されていない**
+- `src-tauri/src/commands/agent.rs` の `send_agent_prompt` は options JSON に cwd を含めず、sidecar 側は `process.cwd() = sidecar インストールディレクトリ` にフォールバックしていた。
+- `SidecarHandle.cwd` にプロジェクトパスを保存するコードはあったものの、`send_agent_prompt` 時に利用されず dead 状態だった。
+
+#### 2. **settingSources が未指定**
+- Claude Agent SDK は **`settingSources` が未指定のとき、CLAUDE.md / .claude/settings.json / MCP config / skills / slash commands を一切自動読込しない**（SDK デフォルト動作）。Claude Code CLI とは異なる。
+- `sidecar/src/agent.ts` の `AgentQueryOptions` 型は `settingSources` を受け付ける構造だが、`sidecar/src/index.ts` の opts 構築時に指定が欠如していた。
+
+#### 3. **skill 実行経路は SDK 自動検出で足りる（P3 不要と判明）**
+- SDK の `Options` には top-level `skills` 無し。`skills` は `settingSources` で有効化された後、SDK が `~/.claude/skills/` + `<cwd>/.claude/skills/` を自動検出する仕組み。
+- したがって P1 (settingSources) を有効化すれば P3 (skill 個別登録) も同時に解決する。
+
+### 決定
+
+**すべての prompt 送信で `cwd` と `settingSources: ['user', 'project', 'local']` を SDK に渡す**。これにより Cursor / Claude Code CLI と同等の context 理解・skill 自動登録を実現。
+
+### 実施内容
+
+#### A. Rust: `send_agent_prompt` で cwd + settingSources 注入
+- `src-tauri/src/commands/agent.rs:726-755`:
+  - `handle.cwd`（`start_agent_sidecar` 起動時に記録済のプロジェクトパス）を毎回の options に `cwd` として挿入
+  - `settingSources: ["user", "project", "local"]` を毎回の options に挿入（Claude Code CLI と同等の読込挙動）
+
+#### B. sidecar: defense-in-depth として default を設定
+- `sidecar/src/index.ts:327-347`:
+  - `opts` 構築時に `settingSources: req.options?.settingSources ?? ["user", "project", "local"]` を default として明示
+  - Rust 側が指定しないケース（手動 IPC や将来の変更）でも安全に動作
+- `sidecar/src/index.ts:363-365`:
+  - debug stderr ログに `settingSources` を追加し、実機で有効状態を可視化
+
+#### C. SlashPalette: skill click の toast 文言修正
+- `components/palette/SlashPalette.tsx:648-674`:
+  - 「Claude のセッションでは自動で利用されます」→「次のプロンプト送信時に Claude が自動で読み込みます」に変更
+  - DEC-055 で **実際に動作する** ようになったため、正確な表現に
+
+### 期待される挙動
+
+| 機能 | Before | After |
+|------|--------|-------|
+| CLAUDE.md 読込 | ❌ 完全に無視 | ✅ user + project 階層を自動読込 |
+| `.claude/settings.json` | ❌ 無視 | ✅ user + project 両方を merge |
+| `.claude/commands/*.md` | △ SlashPalette で表示のみ | ✅ SDK が session で識別、`/cmd` 呼出で実行 |
+| `.claude/skills/<name>/SKILL.md` | △ 表示のみ、呼出で "registered しない" | ✅ SDK が auto-discover、`/ceo` 等で実行可能 |
+| MCP servers | △ 表示のみ | ✅ SDK が `.mcp.json` 自動 load |
+| sidecar cwd | ❌ インストールディレクトリ | ✅ プロジェクトパスに設定（ファイル操作が project root 基準） |
+
+### 検証
+- `npx tsc --noEmit`（root + sidecar）: PASS
+- `cargo test --lib`: **138 passed, 0 failed**
+- sidecar bundle 再ビルド: 806 KB dist/index.mjs 生成成功
+- 実機動作はオーナー側で `npm run tauri:dev` + claude-code-company を開いて確認
+
+### Breaking changes
+- なし（既存動作を「壊れていた」→「正しく動く」に修正するだけ）
+- ただし「Claude が突然 CLAUDE.md に書かれたルールに従い始める」ため、既存会話で Claude が急に口調や挙動を変える可能性あり（期待される変化）
+
+### 後続タスク
+- v1.4.0 は既に tag 済のため、本修正は v1.4.1 として次回リリースに含める
+- Phase 2 で `/skill-name` のフォーム付き呼び出し UI を検討（現状は SDK 経由で Claude が自然言語で認識）
+- MCP 接続状態の live 表示（Phase 2、v1.5+）
+
+---
+
+## PM-967 / PM-968 / PM-969 / DEC-056: UX 改修 3 本（tool 折り畳み / PDF viewer / Workspace）（2026-04-23）
+
+### 背景
+オーナー実機検証から 3 つの改修要望:
+1. **チャット可読性**: Claude レスポンス中の tool use（Read / Edit / Bash / Grep）が数十件並び本質的回答が埋もれる。折り畳み表示したい。
+2. **PDF 文字化け**: `.pdf` をエディタで開くと Monaco が text として流し込み文字化け。正しくビューワで表示したい。
+3. **ヘテロ分割**: chat / editor / terminal / preview が別々の viewMode になっており、同時表示できない。ドラッグ&ドロップで自由に配置したい。
+
+案 C（Tray Bar + DnD）を採用、フル実装で対応。
+
+### 決定
+
+#### PM-967: Tool use 折り畳み表示（v1.4.2）
+- `AppSettings` に `chatDisplay: { showToolDetails: boolean }` を追加、**default `false`（折り畳み ON）**。
+- `components/chat/ToolUseGroup.tsx` 新規: 連続 tool を「N 件の tool 操作 · Read × 5 · Edit × 2」で集約、アコーディオンで展開可能。
+- `MessageList` に `groupConsecutiveTools` の pre-processing を追加、`useMemo` で再計算最小化。
+- `ChatPanel` ヘッダ右上に `Eye / EyeOff` トグルボタン追加、tooltip 付きで状態切替。
+- settings store version 3 → 4、migration で既存ユーザーに `chatDisplay` section を自動注入。
+
+#### PM-968: PDF / 画像 / 動画 / 音声ビューワ（v1.4.2）
+- `components/editor/FileViewer.tsx` 新規: 拡張子別ディスパッチャ
+  - `.pdf` → iframe + `asset://` URL（WebView2/WebKit 内蔵 PDF viewer を流用、外部依存ゼロ）
+  - 画像 7 拡張子 → `<img>`、SVG も同様
+  - 動画 4 拡張子 → `<video controls>`、音声 5 拡張子 → `<audio controls>`
+  - その他 → 既存 `<FileEditor>`（Monaco）
+- `EditorPaneItem` の `FileEditor` → `FileViewer` 差替。
+- `lib/stores/editor.ts` に `BINARY_VIEWER_EXTENSIONS` + `isBinaryViewerFile()` 追加、バイナリ拡張子は `readTextFile` をスキップして `loading:false` で即終了、1MB → 50MB に上限緩和。
+
+#### PM-969: Workspace モード（Tray + DnD ヘテロ分割）（v1.5.0）
+- 新規依存: `@dnd-kit/core@^6.3.1`（~30KB、キーボード a11y 込み）
+- `EditorViewMode` に `"workspace"` 5 番目のモード追加。
+- `lib/stores/workspace-layout.ts` 新規: zustand persist store
+  - `slots: Array<SlotContent | null>` 最大 4
+  - `layout: "1" | "2h" | "2v" | "4"` （2x2 grid の表示パターン）
+  - `SlotContent = { kind: "chat" | "editor" | "terminal" | "preview", refId: string }`
+  - storage key `sumi:workspace-layout`
+- `components/workspace/TrayBar.tsx` 新規: 既存 store から chat panes / open files / terminals / preview を導出、種類別グループ（青/橙/緑/水色）でチップ一覧。各チップは `useDraggable`。すでに slot に配置中の項目は dim 表示。
+- `components/workspace/SlotContainer.tsx` 新規: `useDroppable` でドロップゾーン、slot content の kind に応じて `ChatPanel` / `FileViewer` / `TerminalPane` / `PreviewPane` を描画。ヘッダに種別アイコン + タイトル + ✕ ボタン。空のとき「トレイから項目をドラッグして配置」プレースホルダ。
+- `components/workspace/WorkspaceView.tsx` 新規: `DndContext` で全体を wrap、`onDragEnd` で `setSlot` を発火。`DragOverlay` でドラッグ中の ghost chip を表示。右上に LayoutSwitcher（1 / 2h / 2v / 4）を配置。
+- `Shell.tsx` にワークスペース タブ追加、`viewMode === "workspace"` のとき `<WorkspaceView />` を mount（非 active 時は unmount、既存 view との DOM 競合を回避）。
+
+### 検証
+- `npx tsc --noEmit`: PASS
+- `npm run build`: PASS（既存 pre-existing warning のみ）
+- ChatPanel / FileViewer / TerminalPane / PreviewPane が既存 `paneId` / `openFileId` / `ptyId` prop 設計と整合しているため、slot 内でも同じインスタンスを描画可能。
+
+### Breaking changes
+なし（既存 view mode はすべて維持、workspace は追加の 5 番目 mode）。
+
+### 残課題（v1.6+ 候補）
+- Slot 内 Terminal は TerminalPane を流用しているが、`ptyId` 指定の軽量 renderer に差し替えると UI がさらにすっきりする。
+- Slot の比率可変（現状は grid で均等 50/50）。
+- ストレージに置換した slot の「閉じる」時に対応する chat pane / file も削除する option。
+- keyboard-only での DnD（@dnd-kit は KeyboardSensor 対応のため追加容易）。
+
+---
+
+## PM-970 / DEC-057: Workspace-First UI（タブ廃止 + Tray 刷新）（2026-04-23）
+
+### 背景
+v1.5.0 で追加した Workspace モードは 5 番目のタブとして共存させたが、
+オーナーから「タブ自体が不要、Workspace がアプリそのもの」「Tray Bar の
+チップ名が長すぎる」「サイドバーのファイルを slot 直接 D&D で開きたい」との
+最高 UX を目指す要望。
+
+### 決定
+
+1. **全タブ撤去**。旧 5 タブ（chat/editor/terminal/preview/workspace）を削除、
+   起動時から WorkspaceView のみを常時 mount。
+2. **Tray Bar 1 行化 + コンパクト化**。高さ 44px の 1 段構成に、チップは
+   icon-first で label は 12 文字 truncate + tooltip。
+3. **Tray Bar に新規作成ボタン統合**。💬+ / 🖥+ を 1 クリックで追加可能。
+4. **LayoutSwitcher を Tray 右端に inline 配置**。旧 WorkspaceView の独立行撤去。
+5. **Sidebar → Slot 直接 D&D**。HTML5 native drag (CCMUX_FILE_PATH_MIME) を
+   Slot 側で受け、`@dnd-kit` ハイブリッドで共存。
+
+### 実施内容
+
+#### Shell.tsx の劇的簡素化
+- ViewModeTab 5 件 + 分割 dropdown を削除
+- chat/editor/terminal/preview の display:none / conditional mount block を撤去
+- `<WorkspaceView />` のみを常時 mount
+- viewMode store は残置（openFile の `setViewMode("editor")` 等の副作用は
+  workspace モードでは無視されるだけで害なし）
+
+#### TrayBar 全面書き直し
+- 1 行構成: [チップ一覧] [spacer] [新規作成ボタン 2 種] [区切り] [LayoutSwitcher 4]
+- チップ compact 化: `MAX_CHIP_LABEL_CHARS = 12`、icon + truncated label + tooltip
+- 配置済チップは `opacity-50` で dim 表示、placedRefs は **visible slot のみ** を
+  チェック（非表示 slot に入った参照でも dim しない）
+- 新規作成ボタン:
+  - Chat: `useChatStore.addPane()`
+  - Terminal: `createTerminal(projectId, path)` で pty_spawn
+  - Editor: sidebar 経由のため button 不在
+  - Preview: 1 project = 1 preview なので chip 常時存在、button 不在
+- CreationButton component: tooltip + disabled state + loading indicator
+
+#### SlotContainer の dual-drop 対応
+- @dnd-kit の `useDroppable` は維持（Tray チップ用）
+- HTML5 native の `onDragOver` / `onDrop` を追加
+  - `dataTransfer.types.includes(CCMUX_FILE_PATH_MIME)` で accept 判定
+  - `dropEffect = "copy"` でカーソル表示
+  - `openFile(path)` → `openFiles.find(path)` で id 取得 → `setSlot` 発火
+- `isDragTarget` を `(@dnd-kit isOver && active) || HTML5 isFileDragOver` で統合
+
+#### WorkspaceView 簡素化
+- LayoutSwitcher / LayoutBtn 削除（TrayBar に移動）
+- SlotGrid のみ残置
+
+### 期待される UX
+- **起動直後**: Tray Bar は空 or project 由来の preview チップ + Tips、Slot は
+  「ドラッグして配置」プレースホルダ
+- **チャット追加**: Tray の 💬+ で 1 クリック、チップ生成後に slot へドラッグ
+- **ファイル open**: Sidebar ツリーからファイルを slot 直接ドロップ → 即表示
+- **ターミナル追加**: Tray の 🖥+ で 1 クリックで spawn + チップ生成
+- **レイアウト切替**: Tray 右端のアイコン 4 つで 1 / 2h / 2v / 2x2 を即切替
+
+### 検証
+- `npx tsc --noEmit`: PASS
+- `npm run build`: PASS（既存 pre-existing warning のみ）
+- `cargo check`: PASS
+
+### Breaking changes
+- **ユーザー向け UX の全面変更**: 旧 5 タブを覚えていたユーザーは戸惑う可能性
+  あり。ただし新 UI は「Tray + Slot」の 2 ステップで直感的なため、学習コスト
+  は低い想定。
+- `EditorViewMode` の `"workspace"` 以外の値は内部で意味を持たなくなるが、
+  store / openFile 等の副作用は無害。
+
+### 残課題（非ブロッカー）
+- `viewMode` store の完全撤去（v1.7+ で cleanup）
+- Tab キーでのフォーカス順回遊の最適化
+- Sidebar file drop 中の slot グリッド全体に overlay 表示（視認性向上）
+
+---
+
+## DEC-053: Model / Effort / PermissionMode を TrayBar に移しセッション別管理（**新設 2026-04-24**）
+
+- **意思決定者**: CEO（オーナー指示）
+- **対象バージョン**: v1.9.0（ccmux-ide-gui）
+- **内容**:
+  - StatusBar にあった Model picker / Effort picker を **TrayBar へ移設**し、**セッション単位**で独立管理する
+  - 新規に **PermissionMode picker** を TrayBar に追加（`default` / `acceptEdits` / `bypassPermissions` / `plan` の 4 値、SDK 定義準拠）、これもセッション単位
+  - StatusBar からは Model / Effort UI を撤去。OAuth gauge 等その他は残す
+
+- **設計判断**:
+  1. **store 分離**: `lib/stores/session-preferences.ts` を**新規作成**（monitor.ts 拡張は却下）。理由: monitor.ts は sidecar 計測イベントの受け皿で責務が違う。ユーザー設定と混ぜない
+  2. **Global fallback**: `useDialogStore` の `selectedModel/selectedEffort` は保持し、新規セッション作成時の初期値として継承する（sticky 挙動。`—` 表示ではなく global default をプレロード）
+  3. **sidecar 渡し**: 起動時 argv ではなく `send_agent_prompt` の options に per-query で含める。セッション切替で sidecar 再起動は不要
+  4. **permissionMode 初期値**: `"default"`（現行 sidecar デフォルトと同じ）
+
+- **代替案と却下理由**:
+  - 「monitor.ts に統合」: 責務混在、調査時に dev 提案されたが CEO が却下
+  - 「完全 session 独立（global fallback なし）」: 新規 session で毎回 model 選び直しになり UX 劣化、PM-840 の sticky 思想と矛盾
+  - 「sidecar 再起動で argv 注入」: セッション切替のたびに遅延が発生、永続プロセスの利点が消える
+
+- **実装範囲**:
+  - 新規: `lib/stores/session-preferences.ts`, `components/workspace/TrayModelPicker.tsx`, `TrayEffortPicker.tsx`, `TrayPermissionModePicker.tsx`
+  - 改修: `components/workspace/TrayBar.tsx`, `components/layout/StatusBar.tsx`, `components/chat/InputArea.tsx`（または送信経路）, `src-tauri/src/commands/agent.rs`
+  - 型追加: `lib/types.ts` に `PermissionMode` と `PERMISSION_MODE_CHOICES`
+
+- **関連**: オーナー指示 2026-04-24、前回 session で pending となっていたタスクの正式決裁
+
+---
+
+## DEC-054: 画面分割パターン刷新（2v 削除 / L 字 3 分割追加）（**新設 2026-04-24**）
+
+- **意思決定者**: CEO（オーナー指示）
+- **対象バージョン**: v1.10.0
+- **内容**:
+  - LayoutSwitcher の `WorkspaceLayout` 集合を **`"1" | "2h" | "2v" | "4"` → `"1" | "2h" | "3" | "4"`** に変更
+  - 新 `"3"` は **L 字レイアウト（左 1 画面 + 右上下 2 画面）**。CSS Grid `grid-cols-2 grid-rows-2` で slot0 が左 `row-span-2`、slot1 右上、slot2 右下
+  - `VISIBLE_SLOTS["3"] = [0, 1, 2]`
+- **Migration**:
+  - 既存 localStorage の `"2v"` は起動時に `"2h"` に自動変換
+  - slot2 に配置されていた chip は slot1 に移送、slot1 既存内容は slot2 にスワップせず破棄（情報量減るが破壊的ではない）
+- **理由**: オーナー要望「3 分割を追加、2v は使っていないため削除」。2v + 2h の差別化が弱く、L 字 3 分割の方が Chat / Editor / Preview の一般的 IDE レイアウトに合致
+- **代替案と却下理由**:
+  - 2v を残し 3 を追加（5 種類）: LayoutSwitcher ボタンが増えて UI 圧迫、オーナーが明示的に 2v 削除指示
+  - 3 分割を「左右3 等分」: IDE 用途としてペイン幅が狭すぎる
+
+---
+
+## DEC-055: Project 別 Workspace Layout 独立保持（**新設 2026-04-24**）
+
+- **意思決定者**: CEO（オーナー指示）
+- **対象バージョン**: v1.10.0
+- **内容**:
+  - `useWorkspaceLayoutStore` を **`layouts: Record<sessionId, SessionLayout>` → `layouts: Record<projectId | "__global__", Record<sessionId | "__default__", SessionLayout>>`** に拡張
+  - Current key は `(activeProjectId ?? "__global__", currentSessionId ?? "__default__")` の複合で参照
+  - project 切替時に前 project の layout が新 project に影響しない
+- **原因分析**:
+  - 現行 store は sessionId キーのみ。project 切替で同一 sessionId が再利用される（project A で使った session が project B でも active）と、前 project の slot 配置 / layout 種別が復活する
+  - v1.7.4 PM-981 の session 別化は session 切替には効いたが project 切替は想定外だった
+- **Migration**:
+  - 旧 flat 形 `{ [sid]: {...} }` は新形の `{ "__legacy__": { [sid]: {...} } }` に退避
+  - `__legacy__` は参照されない（各 project が空から始まる）
+  - 既存ユーザーは「初期レイアウト」が新 project ごとにリセットされる（破壊的だが期待挙動）
+- **理由**: オーナー実測で leak 確認、CEO として責務分離的に project scope に移す必要あり
+- **代替案と却下理由**:
+  - 新規 session を project 切替時に自動作成: session 切替ロジック追加で影響範囲大
+  - layout を project 単位だけ（session は持たない）: session 別管理 PM-981 を後退させる
+
+---
+
+## DEC-056: Preview を localhost は in-window iframe、外部 URL は別ウィンドウに分岐（**新設 2026-04-24、DEC-052 条件付き上書き**）
+
+- **意思決定者**: CEO（オーナー指示）
+- **対象バージョン**: v1.10.0
+- **内容**:
+  - URL 判定: `localhost` / `127.0.0.1` / `*.localhost` / `0.0.0.0` を **internal** 判定
+  - internal: slot 内に `<iframe>` で表示
+  - external: 既存 `spawn_preview_window`（Rust `WebviewWindowBuilder`、DEC-051）継続、slot 内は「外部ウィンドウで開く」ボタン + URL 状態表示
+  - iframe 属性: `sandbox="allow-same-origin allow-scripts allow-forms allow-popups"` / `referrerpolicy="no-referrer"`
+- **DEC-052 との関係**: DEC-052 は「同一 window 内 multi-webview（Tauri unstable feature）」を見送ったもので、**通常の `<iframe>` とは別技術**。今回の localhost iframe は CSP `frame-src http://localhost:* http://127.0.0.1:* http://*.localhost https:` で既に許可済み、複雑性は低い
+- **DEC-048 との関係**: DEC-048 の iframe 撤退理由は外部 URL の `X-Frame-Options: DENY` 問題が主因。localhost はサーバ側で自己コントロール可能なため撤退対象外
+- **代替案と却下理由**:
+  - 全 URL で別ウィンドウ（現状維持）: localhost 開発の UX が別プロセス行き来になり不便
+  - 全 URL で iframe: 外部 URL は X-Frame-Options DENY で表示不能、DEC-048 で既に不採用
+  - Tauri WebviewBuilder で slot 埋め込み（DEC-052 案 D2）: unstable feature で stability リスク、DEC-052 で見送り済
+
+---
+
+## DEC-057: Session Preferences を Project 別に独立保持（DEC-053 改訂）（**新設 2026-04-24**）
+
+- **意思決定者**: CEO（オーナー指示）
+- **対象バージョン**: v1.11.0
+- **背景**:
+  - DEC-053 で session-preferences store を導入、global fallback として `useDialogStore.selectedModel/selectedEffort` を新規 session の初期値とした
+  - 結果、project A で model を変更 → dialog.selectedModel = Opus → project B に切替 → B の session でも Opus が継承（Project 切替で前 project の設定が引き連れられる leak 発生）
+  - DEC-055（Workspace Layout の project 別化）と同根の問題
+
+- **内容**:
+  - `useSessionPreferencesStore` を拡張し、**project 単位の「最後に使った設定」** を保持する `perProject: Record<projectId, SessionPreferences>` を追加
+  - `perSession: Record<sessionId, SessionPreferences>` は維持（session 別の現行値）
+  - 新 session 作成 / 初期化時は、**そのセッションが所属する project の `perProject[projectId]` を継承**（存在しなければハードコード default）
+  - **`useDialogStore` の `selectedModel` / `selectedEffort` は session-preferences の初期化源から除外**（完全に project 単位へ移管）
+  - `setPreference(sessionId, patch)` 時に該当 session の projectId を解決し、`perProject[projectId]` も同時更新（project scoped sticky）
+
+- **Hard-coded default**:
+  - `model`: `null`（sidecar 側で SDK auto-detect、= Claude Max プランの既定モデル）
+  - `effort`: `null`（SDK adaptive thinking）
+  - `permissionMode`: `"default"`
+
+- **Migration**:
+  - 既存の `perSession` データはそのまま保持（session ID は不変）
+  - `perProject` は空で開始、各 project で次回 setPreference 時に記録される
+  - `persist` version を上げ、旧形は `perSession` のみ存在するものとして読み込み
+
+- **代替案と却下理由**:
+  - 「global fallback を完全撤廃、session 毎に hard-coded default」: 毎回モデル選び直しで UX 劣化（sticky 喪失）
+  - 「project ごとに project-level runningModel/runningEffort (useProjectStore) を使う」: project.ts は揮発フィールドの責務、permission/effort も混ざると責務混在
+  - 「DEC-053 の dialog 継承を維持」: 本 leak が解消しない（=差戻しの要因）
+
+- **関連**: オーナー指示 2026-04-24、DEC-053 の改訂、DEC-055 と同パターンで project scope 独立化
+
+---
+
+## DEC-058: Project 削除時に Session を cascade 削除 + 関連 store 全 cleanup（**新設 2026-04-24**）
+
+- **意思決定者**: CEO（オーナー指示）
+- **対象バージョン**: v1.12.0
+- **問題**:
+  - Project を削除しても、その project に所属していた session が DB / store に残留
+  - session が「親 project なし」の孤児状態になり、画面上にも残ったり、他 project に誤って表示される恐れ
+  - session-preferences / workspace-layout / preview / session-order など、projectId をキーにする store でも entry が残る
+
+- **内容**:
+  1. **Rust (DB) 層**: `delete_project(projectId)` 実行時に以下を**同一トランザクション**で処理
+     - `sessions` テーブルから `WHERE project_id = ?` を DELETE（cascade）
+     - session に紐付く JSONL / artifacts があれば該当パスもクリーンアップ（任意、破壊範囲限定）
+     - 最後に `projects` テーブルから削除
+     - 既存の `sessions_has_project_id` 列（cargo warning で未使用と検知されていた）を正式活用
+  2. **Frontend store cleanup**（削除成功後にフロント側で）:
+     - `useSessionStore`: 該当 project の session を state から除外、`currentSessionId` が削除対象なら null or 残存 session へ切替
+     - `useSessionPreferencesStore`: `perProject[projectId]` 削除 + 削除対象 session 群の `perSession[sid]` 削除
+     - `useWorkspaceLayoutStore`: `layouts[projectId]` 削除
+     - `usePreviewStore` / `usePreviewInstancesStore`: project 単位の URL 履歴 / geometry / instance を削除
+     - `useSessionOrderStore`: `order[projectId]` があれば削除
+     - `useMonitorStore`: 削除対象 session 群の `perSession[sid]` を削除
+     - `useTerminalStore` / `useEditorStore` / `useChatStore` / `usePreviewInstances` 等、session キーを持つ他 store も併せてパージ
+
+- **設計判断**:
+  - **DB cascade は SQLite FK `ON DELETE CASCADE` ではなく Rust transaction 内で明示 DELETE**（FK 制約が既存マイグレーションで有効化されていない可能性 + 他 metadata cleanup も同 transaction で完結できる方が明示的）
+  - **Frontend cleanup は 1 箇所に集約**（`lib/stores/session.ts` の `deleteProject` action 相当 or 新規 `purgeProjectArtifacts(projectId, sessionIds)` util）
+  - **削除の非可逆性**: confirm dialog は既存の有無に応じて現状維持、今回は root-cause の cleanup 漏れを修正するのみ
+
+- **代替案と却下理由**:
+  - 「SQLite の `ON DELETE CASCADE` を FK に追加」: 既存 DB migration の複雑化、他 metadata (artifacts path 等) は DB 外なので cascade ではカバーしきれない
+  - 「session を論理削除（flag）」: UI 上の残留が解消せず、ゴミデータが累積
+
+- **関連**: DEC-055（layout 別化）、DEC-057（prefs 別化）の延長として、project 削除による leak 方向の leak 解消
+
+---
+
+## DEC-059: デフォルト allowedTools 拡張 + ツール許可承認 UI 実装（**新設 2026-04-24**）
+
+- **意思決定者**: CEO（オーナー指示）
+- **対象バージョン**: v1.13.0
+- **問題**:
+  - `sidecar/src/index.ts:336-343` の `allowedTools` デフォルトが `Read/Edit/Write/Bash/Glob/Grep` のみ
+  - SDK は allowedTools 未列挙のツール実行時に `canUseTool` callback を呼ぶが、Sumi は未実装
+  - 結果、WebSearch 等を要求すると「haven't granted it yet」で無限停止
+
+- **内容（2 案を同一 PR で）**:
+
+  ### 案A: デフォルト allowedTools の拡張
+  - `sidecar/src/index.ts` のデフォルト `allowedTools` に以下を追加:
+    - `WebSearch`、`WebFetch`、`TodoWrite`、`NotebookEdit`
+  - 理由: リサーチ系は destructive でないため無確認許可で UX 向上。TodoWrite / NotebookEdit は既存の Edit / Write と同レベルの破壊性
+
+  ### 案B: ツール許可承認 UI（canUseTool 経由）
+  - **sidecar**: `AgentQueryOptions.canUseTool` callback を登録。tool 実行要求時に Rust へ JSON line で `permission_request` を送信、Rust からの response を `await` で待って SDK に `{behavior: "allow"|"deny", ...}` を返却
+  - **Rust**: stdout parser で `permission_request` を処理し、Tauri event で Frontend へ emit。Frontend からの `resolve_permission_request` command で sidecar stdin へ response 送信
+  - **Frontend**: 
+    - 新規 store `lib/stores/permission-requests.ts` で保留中 request をキュー管理
+    - 新規コンポーネント `components/permission/PermissionDialog.tsx` をモーダル表示
+    - 選択肢: 「今回のみ許可」「今回のみ拒否」「このセッションで常に許可」「このセッションで常に拒否」の 4 ボタン
+    - tool input の要約表示（Bash→command、Write→path、WebSearch→query 等、長文は折りたたみ）
+  - **session-preferences 拡張**: `SessionPreferences` に `allowedTools: string[]`, `deniedTools: string[]` を追加。"常に許可/拒否" 選択時に記録、次回以降の同 tool 要求を自動判定
+  - **タイムアウトなし**: ユーザー応答を無期限待機（SDK abort controller で interrupt 可能）
+
+- **設計判断**:
+  - **案A の追加リスト** は「Web 情報取得 + タスク管理 + Notebook 編集」に限定。MCP tools (`mcp__*`) は含めない（明示承認が妥当）
+  - **永続化スコープ は session 単位** から開始。project / global は v1.14 以降で検討（スコープ肥大防止）
+  - **UI 位置** はモーダル中央表示（タスクブロッキングが前提）、右下トースト通知方式は却下（見落とし多発）
+  - **「拒否」時の挙動**: SDK に `{behavior: "deny", message: "ユーザーが拒否しました"}` を返却、Claude 側で代替行動を検討させる
+  - **複数同時 request** はキュー化、順次処理
+
+- **代替案と却下理由**:
+  - 「案A のみ、案B は後送り」: オーナー指示で両方要望、本質的解決は案B
+  - 「案B のみ、allowedTools デフォルトは据え置き」: 案A の 4 tool は承認 UI で都度聞く必要なし（ノイズ増）
+  - 「タイムアウト 60 秒で自動拒否」: 長時間席を外した場合に生産性低下、SDK abort で代替
+  - 「project / global 永続化も同時実装」: スコープ肥大、まず session 単位で仕上げてから拡張
+
+- **関連**: DEC-053（TrayPermissionModePicker）、オーナー指示 2026-04-24
+
+---
+
+## DEC-060: plansDirectory を project cwd 配下に固定 + cwd 外書込 UI 警告（**新設 2026-04-24**）
+
+- **意思決定者**: CEO（オーナー指示）
+- **対象バージョン**: v1.14.0
+- **問題**:
+  - `~/.claude/planit/` (正確には `~/.claude/plans/`) 配下に ExitPlanMode が plan を書き込んでいた
+  - オーナーは「指定作業ディレクトリ配下でのみ作業してほしい」との要望
+- **原因**:
+  - sidecar が `settingSources: ["user", "project", "local"]` を渡しており、SDK が `~/.claude/settings.json` を読込
+  - その際 `plansDirectory` が SDK デフォルト `~/.claude/plans/` として解決される
+  - ExitPlanMode は plansDirectory 絶対パスに書込、cwd と無関係
+  - cwd 自体は Frontend → Rust → sidecar → SDK まで正しく project dir が渡っている
+- **Claude Code 公式仕様**（公式 docs 確認）:
+  - Bash: cwd + subdirectories に sandbox
+  - Read/Edit/Write: sandbox なし、permission system で制御
+  - SDK に cwd-sandbox 全体オプションは無い
+  - つまり Claude Code Desktop も「ハイブリッド方式」。Sumi も同方針でよい
+
+- **内容**:
+  1. **plansDirectory を project cwd 配下に固定**
+     - Rust `send_agent_prompt` で options に `plansDirectory: "{cwd}/.claude/plans"` を常時注入（呼び出し側で明示指定が無い場合）
+     - これで ExitPlanMode の書込先が project 内に限定
+  2. **Permission Dialog (DEC-059 案B) の拡張**
+     - Write / Edit tool の permission request 受信時、絶対パスを解析
+     - `path` が cwd 配下でない場合、dialog 内に赤色警告バナーを表示: 「作業ディレクトリ外への書込みです: `<cwd>` の外側」
+     - ユーザーが判断しやすいよう、cwd 配下 / 外で dialog の配色 (ボーダー赤) を切替
+  3. **却下案**:
+     - settingSources から `"user"` 除外: `~/.claude/.credentials.json` の Max OAuth に影響、却下
+     - Tool wrapper / hooks で cwd 外書込 reject: Bash 以外の hard sandbox 実装は SDK 非標準で複雑、DEC-060 では見送り（必要なら v1.15 で検討）
+     - systemPrompt 注入: モデル気まぐれで弱い、補助すら不要と判断
+- **後方互換**: 既存 `.claude/plans/` への書込ユーザーは引っ越し不要（新書込みは project 内に行くだけ、過去データは削除もしない）
+- **関連**: DEC-059（permission UI）、オーナー指示 2026-04-24
+
+---
+
+## DEC-061: Chat Markdown レンダリング品質を Cursor レベルに引き上げ（**新設 2026-04-24**）
+
+- **意思決定者**: CEO（オーナー指示）
+- **対象バージョン**: v1.15.0
+- **問題**:
+  - Chat 表示で Markdown table がプレーンテキスト（`|`、`---` がそのまま）
+  - 段落と table が連結表示（blank line が欠落）
+  - 全体的に Cursor 上の Claude Code 並みの美観に達していない
+- **調査結果の要旨**:
+  - `react-markdown@9` + `remark-gfm@4` + `rehype-highlight@7` + `highlight.js@11` は導入済、設定も正しい
+  - `@tailwindcss/typography` **未導入** — 手書き mdComponents で table 等を個別整形しているが不完全
+  - sidecar → Frontend 経路で `\n` は保持されている
+  - 真因: **Claude が出力する markdown で table 直前に blank line が欠落することがあり、GFM parser が table と認識しない**
+- **内容（3 本柱）**:
+
+  ### Must（必須）
+  1. **`@tailwindcss/typography` 導入** — devDependency に追加、`tailwind.config.*` の plugins に登録
+  2. **`prose` class 適用** — `AssistantMessage` root に `prose prose-sm prose-invert max-w-none` 適用、theme に応じて light / dark 切替
+  3. **`remark-breaks` plugin 追加** — 単一 `\n` も `<br />` として扱い、段落/table 境界の blank line 不足を吸収（GitHub 互換挙動）
+  4. **手書き mdComponents の整理** — prose が担当する要素（p / ul / ol / blockquote / h1〜h6 / table）は削除、残すのは `a` / `code` / `pre` / `img` の特殊ハンドリング
+  5. **table の CSS 強化** — `prose` のデフォルトに border / padding / header bg を tailwind config extend で上書き
+
+  ### Should（推奨）
+  6. **リンクのクリック可能化** — `a` タグを Tauri `shell.open` で外部ブラウザ起動（既存の `@tauri-apps/plugin-shell` 利用）
+  7. **Code block のコピーボタン** — `pre` の右上に「コピー」ボタン、clipboard-manager 既存 dep 利用
+  8. **言語別 syntax highlight の視認確認** — `github-dark.css` / `github.css` を theme で切替
+  9. **Task list 対応** — `- [ ]` / `- [x]` のチェックボックス表示（GFM 仕様、remark-gfm で自動）
+
+  ### Could（将来候補、v1.15 では見送り）
+  10. Diff view（```diff block 独自 styling）
+  11. Mermaid / KaTeX（dependency 肥大）
+  12. 折りたたみ可能な details block（既に `<details>` は rehype-raw で可）
+
+- **blank line 自動補完の判断**:
+  - sidecar 側で Claude 出力を改変するのは**却下**（本来の出力を変更すべきでない）
+  - 代わりに **`remark-breaks` で parser 側が寛容に解釈**する（業界慣行）
+  - 追加で、Frontend 側で**軽量 preprocess**（「行頭に `|` がある行の直前が blank line でない場合、空行を挿入」）も検討
+- **影響範囲**:
+  - `AssistantMessage.tsx` が大幅書き換え
+  - `tailwind.config.ts` に typography plugin 追加
+  - 表示の見た目が広範囲に変わる（改善方向）
+  - 既存スレッドのメッセージも新表示で再レンダリングされる（非破壊）
+- **代替案と却下理由**:
+  - 「手書き mdComponents を拡張し prose 不使用」: Cursor 品質に到達するコストが高い、typography plugin で解決した方が効率
+  - 「sidecar で markdown preprocess」: 出力の正確性を壊すリスク、却下
+- **関連**: オーナー指示 2026-04-24
+
+---
+
+## DEC-062: 自動更新機能の再有効化 + UX 強化（**新設 2026-04-24**）
+
+- **意思決定者**: CEO（オーナー指示）
+- **対象バージョン**: v1.16.0
+- **現状調査結果**:
+  - `tauri-plugin-updater v2` 導入済、`tauri.conf.json` の endpoint / installMode / pubkey=空 設定済（PM-283 / DEC 記録）
+  - `components/updates/UpdateNotifier.tsx` (216 行) が完全実装済: 起動時 silent check / 手動 check / download progress / sonner toast / relaunch 全機能
+  - `Shell.tsx:44-45` で **コメントアウト（disabled）状態** — M3 MVP 時に React error #185 容疑で一時 disable、その後 dogfood で不要と判断され放置
+  - `.github/workflows/release.yml` は完全機能、v1.15.0 release で `latest.json` が正常配信確認済（GitHub 302 → 200）
+  - pubkey 空のため署名検証は skip（DEC 記録通り M3 MVP 許容、将来 Ed25519 鍵発行で差し替え）
+
+- **内容**:
+
+  ### Must（v1.16.0 で必須）
+  1. **UpdateNotifier を Shell に再マウント** — `Shell.tsx:44-45` のコメント解除
+  2. **React error #185 の再発防止策**:
+     - UpdateNotifier 全体を独自 ErrorBoundary で包み、万一のクラッシュでもアプリ本体には波及させない
+     - `useEffect` 内の dependency 配列を精査、Zustand selector が useCallback 依存に混ざっていないか確認
+     - listener 登録は mount once、unmount で確実に cleanup
+  3. **TitleBar に update available バッジ追加**:
+     - update が検出された時点で TitleBar 右端に小さな「新バージョン」アイコン（lucide `DownloadCloud`）+ dot を表示
+     - クリックで UpdateDialog を開き「更新する」「後で」「このバージョンをスキップ」の 3 択
+
+  ### Should（v1.16.0 推奨）
+  4. **「このバージョンをスキップ」機能**:
+     - 選択時に `localStorage` に `sumi:updater:skip-version = "1.16.0"` を記録
+     - 次回 startup check で同バージョンは無視、次のバージョンが出るまで通知しない
+  5. **設定に「自動更新チェック」ON/OFF toggle**:
+     - 新規 `useUpdaterSettings` store（localStorage persist）
+     - `autoCheck: boolean`（default: true）
+     - OFF の場合 startup check を skip、手動 check は引き続き有効
+
+  ### Could（v1.17 以降）
+  - 定期チェック（例: 6 時間ごと）
+  - リリースノート表示（GitHub Release API から markdown 取得）
+  - Ed25519 署名検証（pubkey 鍵発行）
+
+- **UX 指針**（Cursor / VSCode 準拠）:
+  - silent startup check → 見つかったら toast + TitleBar badge
+  - toast は 20 秒、ユーザーが見逃しても TitleBar badge で気づける
+  - download は toast に progress %、完了時は toast success + 自動 relaunch
+  - 「後で」「スキップ」「今すぐ」の 3 択で強制しない
+
+- **リスク対策**:
+  - React error #185 再発 → ErrorBoundary で封じ込め + crash 時 disable fallback
+  - 署名検証なし → M3 MVP 許容、endpoint は固定 github.com のため TOFU リスクは限定的
+  - passive install の UX → installMode=passive は変えず、toast に「再起動中」明示
+
+- **代替案と却下理由**:
+  - 「disabled のまま維持し手動 check のみ」: オーナー要望に未到達
+  - 「pubkey を同時発行して署名検証有効化」: スコープ肥大、v1.17 以降で鍵発行と合わせて実装
+  - 「独自 updater に置き換え」: tauri-plugin-updater で十分、再発明不要
+
+- **関連**: PM-283（updater 初期導入）、オーナー指示 2026-04-24
+
+---
+
+## DEC-063: Session-Level Sidecar 正式昇格 (DEC-042 Option B)（**新設 2026-04-24**）
+
+- **意思決定者**: CEO（オーナー指示）
+- **対象バージョン**: v1.17.0
+- **関連**: DEC-033 (Multi-Sidecar / JobObject) / DEC-042 (Option B 候補) / DEC-053-058 (Session Scope) / DEC-059 (Permission) / PM-810 (Pane Routing) / PM-830 (Resume)
+
+- **問題**:
+  - 現状 v3.3 (Option A) は `AgentState { HashMap<project_id, SidecarHandle> }` で **1 project 1 sidecar**
+  - 同一 project 内で 2 session を並列実行すると、sidecar の並列 prompt 処理 + Frontend routing が DEFAULT_PANE_ID 固定のため、session 間のメッセージが混線
+  - SDK の同一プロセス内並列 query について context 混在 zero guarantee なし
+
+- **調査結果の要旨**:
+  - **真因箇所**: `src-tauri/src/commands/agent.rs` L605-645 (stdout/stderr リレーが session 未分離), `sidecar/src/index.ts` L771 (handlePrompt が void で await しない並列実行), `hooks/useAllProjectsSidecarListener.ts` L104 (DEFAULT_PANE_ID 固定), `lib/stores/chat.ts` L236-241 (同一 pane 内で複数 concurrent session がマージされる)
+  - **Anthropic 公式 Claude Code Desktop** は split-panel で「2 fully independent AI agent contexts, they don't share memory, they don't interfere」と明言 (https://claude.com/blog/claude-code-desktop-redesign)
+  - **SDK** は `each query() call starts a new session by default` と記載、session-level sidecar = session ごと独立 query() call の設計を full support
+
+- **内容**:
+
+  ### 採用案: Option B (Session-Level Lazy Spawn Sidecar)
+  - `AgentState` を `HashMap<session_id, SidecarHandle>` に**移行**（project_id キーは廃止）
+  - **Lazy spawn**: session の初回 `send_agent_prompt` で sidecar を spawn、以降 reuse
+  - **明示停止**: session 削除 (`purgeSessions`) で sidecar を kill。project 削除 (DEC-058) でも所属 session の sidecar を全 kill
+  - **OAuth 共有**: `~/.claude/.credentials.json` は全 sidecar が独立読込可能（SDK 仕様）
+  - **cwd / plansDirectory**: 同 project 内なら同一 cwd を使うが、書込は `.claude/plans/<session-id>/` 以下に分離して競合回避（DEC-060 延長）
+  - **Max 同時上限**: 8 session（内部制限、UI 非表示）。超過時は最古の idle sidecar を hibernate or reject（今回は reject + toast で通知）
+  - **JobObject**: DEC-033 Chunk A の仕組みを流用、複数 sidecar を 1 JobObject で管理
+  - **Frontend routing**: `useAllProjectsSidecarListener` で `(projectId, sessionId)` tuple の pane 逆引きを実装、DEFAULT_PANE_ID 固定を解除
+  - **DB**: `sessions` table に `sidecar_pid` (nullable, debug 用) / `sidecar_started_at` (nullable) カラム追加、migration 付き
+
+  ### 却下した代替案
+  - **Option A (常時起動)**: メモリ消費大（10 session × 100MB = 1GB）、v1.17 不現実
+  - **Option C (single sidecar + strict routing)**: SDK 内部の hidden state black-box、cross-contaminate zero guarantee なし、SDK update 追従リスク
+  - **Hibernate (N 分 idle で kill)**: 再 spawn 2-3 秒の遅延で UX 劣化、v1.18 以降検討
+
+- **リソース試算**:
+  - 10 session 同時: Node.js プロセス 80-120MB × 10 = 800MB-1.2GB（Windows で許容範囲）
+  - 起動時間: 初回 prompt で 1-2 秒追加遅延（toast で通知）、以降 reuse で即応
+  - 現実的 UX 上限: 5-8 session 並列（内部 max 8）
+
+- **影響範囲**:
+  - DEC-033: 継続（JobObject は session-level でも有効）
+  - DEC-053-057: 拡張（session ごと sidecar + preferences）
+  - DEC-058: 統合（session cascade delete → sidecar kill 追加）
+  - DEC-059: 継続（canUseTool callback は session スコープ内で正常動作）
+  - PM-810 (v3.6 Pane Routing): 準備（session_id を event payload に含める）
+  - PM-830 (Resume): 継続（session 単位 resume は既実装）
+
+- **実装タスク分解 (10〜17 日)**:
+  1. AgentState を session_id キーに移行（start/stop/send の signature 変更）
+  2. Frontend → Rust 呼び出しを session 単位に切替
+  3. sidecar 起動 argv / env に session_id を追加
+  4. Frontend routing を (projectId, sessionId) tuple で pane 逆引き
+  5. Session 削除 cascade kill（DEC-058 統合）
+  6. Project 削除 cascade kill (project 所属 session の sidecar を一括)
+  7. Max 同時上限 + toast 通知
+  8. plansDirectory を session 単位に細分化（`.claude/plans/<session-id>/`）
+  9. DB migration (sessions.sidecar_pid / sidecar_started_at)
+  10. 既存 E2E test の追従 + 新規 E2E: 2 session 同時指示で独立性確認
+  11. Resource leak 検証 (タスクマネージャ kill、孤立プロセス監視)
+  12. review 部門レビュー → push → tag v1.17.0
+
+- **関連**: オーナー指示 2026-04-24
+
+---
+
+## DEC-064: Message Storage を Session 単位に移行 + SessionList に状態マーク追加（**新設 2026-04-24**）
+
+- **意思決定者**: CEO（オーナー指示）
+- **対象バージョン**: v1.18.0
+- **背景**:
+  - v1.17.0 (DEC-063) で sidecar 分離は完了、session ごとに独立 Claude プロセスが動作
+  - しかし messages を保持する `useChatStore` は依然 **pane 単位** (`panes[paneId].messages`) のまま
+  - event 受信時に `findPaneIdForSession(projectId, sessionId)` で pane 逆引き → 該当 pane が見つからない場合に fallback で active pane に描画される可能性
+  - 結果: session A の prompt を送った後 session B に切替えると、A の response が B を表示中の pane に届いて混線
+  - ユーザー観察: 「session 1 で『何度指示した？』と聞くと正しく『1回』と回答するが、続けて『どう回答した？』と聞くと、Claude B（session 2）の回答を返してくる」 = Claude 自体は独立だが UI 描画側が混線
+  - 加えて session の作業状態が可視化されていない（どの session が思考中 / 完了か）
+
+- **内容**:
+
+  ### 1. Message Storage を Session 単位に移行
+  - `useChatStore` を refactor:
+    - 旧: `panes: { [paneId]: { messages, ... } }` に messages が pane 単位
+    - 新: `sessionMessages: Record<sessionId, ChatMessage[]>` に **session 単位**で保持、`panes` は viewport (どの session を表示中か) のみ
+  - pane の表示は `sessionMessages[pane.currentSessionId]` を参照
+  - 同一 session を複数 pane で表示する場合、**両方の pane が同じ history を見る**（真の一貫性）
+  - event 受信時は **session_id 一択**で messages を追加、pane 探索は不要に
+  - session 削除時は `sessionMessages[sessionId]` を削除（DEC-058 cascade に統合）
+
+  ### 2. Event Routing を session_id 厳密化
+  - `useAllProjectsSidecarListener` で pane 逆引きを廃止、event の session_id で **直接** `sessionMessages` に append
+  - 「どの pane にも該当 session が表示されていない」状態でも、messages は session の history として蓄積
+  - ユーザーが後で該当 session を pane で開くと履歴が即座に表示される
+
+  ### 3. Session 状態マーク
+  - `useSessionStore` の各 session に **volatile な status** を追加:
+    - `status: "idle" | "thinking" | "streaming" | "error"`
+    - `lastActivityAt: number`
+  - sidecar event のライフサイクルで status 更新:
+    - `send_agent_prompt` invoke → `thinking`
+    - 最初の `message_start` or `text_delta` → `streaming`
+    - `message_stop` / `result` → `idle`
+    - `error` → `error`
+  - **SessionList に icon 表示**:
+    - thinking: Loader 回転（lucide `Loader2` animate-spin）
+    - streaming: 点滅 dot（primary color）
+    - idle: 表示なし（デフォルト）
+    - error: 赤 `AlertCircle`
+  - tooltip で状態ラベル（「思考中」「応答中」「完了」「エラー」）
+
+  ### 4. 互換性
+  - 既存の `panes[paneId].messages` は廃止、localStorage migration で削除（session_id で再構築不可なので **破棄**）
+  - 既存 history は **session DB (messages table)** に残っているので、session re-open 時に hydration
+  - `creatingSessionId` による pane scope（v1.7.4 PM-979）は保持（session 作成時の初期化に必要）
+
+- **設計判断**:
+  - **Message を session 単位に移すのが正解**（pane は viewport、session が truth）
+  - 同じ session を 2 pane で開いたときの「両 pane が同じ history を見る」仕様は**意図通り**（session は 1 会話、pane は複数窓）
+  - 「送信時の pane を session に binding」案は却下（pane を close したら session も孤立する、UX 劣化）
+  - status は volatile（永続化不要、再起動で idle リセット）
+  - Max 8 session の制限は DEC-063 で既存、status 表示はそれに直交
+
+- **代替案と却下理由**:
+  - pane 単位保持のまま event routing を厳密化: session 切替で pane の messages 入れ替え時に混乱が残る
+  - session に `activePaneId` を持たせる: pane close で dangling reference、UX 劣化
+  - status 永続化: 再起動で必ず reset が自然、永続化の利点なし
+
+- **関連**: DEC-063 (session-level sidecar)、DEC-058 (cascade), PM-979 (creatingSessionId), オーナー指示 2026-04-24
+
+### 追記（2026-04-24 同日）: 思考中アイコンの持続
+- オーナー観察: 「思考中にセッションを移動すると、思考中であったセッションの思考中マークが消える」
+- 原因仮説: session.status を pane 切替に連動して reset している、または SessionList が pane.currentSessionId 基準でステータスを描画している
+- 仕様確定:
+  - session.status は **pane 切替とは独立** の session 固有 volatile 値
+  - SessionList は各 session row について **その session 自身の status** を表示（pane が何を表示しているかと無関係）
+  - 思考中 session を非アクティブ pane で待機させても、sidebar で常に「思考中」アイコンが見え続けることが正しい挙動
+  - 応答受信完了 (`message_stop` / `result`) で初めて `idle` に戻す
+
+---
+
+## DEC-065: Ed25519 署名ベース updater への移行（DEC-059 の署名検証保留を解除）（**新設 2026-04-24**）
+
+- **意思決定者**: CEO（オーナー指示 + 技術的強制）
+- **対象バージョン**: v1.19.0
+- **背景**:
+  - v1.16.0 以降、`tauri.conf.json` の `pubkey=""` 運用で auto-updater を deploy
+  - v1.18.1 で signature 空文字列のまま updater が「Invalid encoding in minisign data」エラーで fail
+  - v1.18.2 で signature field 省略を試みたが、dev 調査で `tauri-plugin-updater 2.10.1` の `ReleaseManifestPlatform.signature: String` が **serde 必須 field**（非 Option）と判明、missing でも deserialize エラー
+  - Tauri v2 公式 docs で「signature verification cannot be disabled」明記、pubkey 空の skip は v1 系の仕様
+- **結論**: 署名なし運用は完全に破綻、Ed25519 鍵ペア発行 + 署名ベース updater に移行するしかない
+
+- **内容**:
+  1. **Ed25519 鍵ペア発行**: dev が local で `npx @tauri-apps/cli signer generate -w ~/.tauri/sumi.key` 相当を実行
+  2. **Public key を `src-tauri/tauri.conf.json` の `plugins.updater.pubkey`** に埋め込み
+  3. **Private key を GitHub Secrets** に登録（環境変数 `TAURI_SIGNING_PRIVATE_KEY`、passphrase は `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` optional）
+     - private key は dev から出力値を CEO 経由でオーナーに渡し、オーナーが GitHub repo の Secrets 設定画面で登録
+     - private key は **絶対に git に commit しない**、.gitignore / secret scanning 対策確認
+  4. **`.github/workflows/release.yml` 拡張**: 
+     - env に `TAURI_SIGNING_PRIVATE_KEY` / `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` を渡す
+     - tauri-action (または手動 tauri build) で署名生成、各 artifact に `.sig` ファイルが生成される
+     - latest.json 生成時に各 platform の `.sig` ファイル内容を読んで `signature` field に埋める
+  5. **既存 v1.16.0 〜 v1.18.2 ユーザーの移行**:
+     - 自動更新は**不可能**（既存 binary の埋め込み pubkey が空なので、新 v1.19.0 の署名付き latest.json を検証できない、もしくは検証しようとして新しいエラーになる）
+     - 対応: CHANGELOG / Release notes / LP に「v1.19.0 以降は Ed25519 署名付き、既存 v1.18 以前からの自動更新不可。**GitHub Release ページから v1.19.0 installer を手動 DL し上書きインストールしてください**」を明記
+     - LP (`site/`) にも「手動移行の案内」バナーを一時掲出
+  6. **v1.19.0 以降は自動更新が正常動作**
+
+- **代替案と却下理由**:
+  - 「updater 完全無効化」: オーナー要望の自動更新が失われる、却下
+  - 「tauri v1 系にダウングレード」: 他機能（protocol-asset、PTY 等）の互換性問題、非現実的
+  - 「別 updater プラグインの採用」: エコシステム外、サポート薄い、メンテ負担大
+
+- **リスク**:
+  - private key の管理ミスで漏洩したら攻撃者が偽 update を配信可能 → Secrets 管理を厳守、鍵 rotation 手順もドキュメント化（v1.20 以降）
+  - v1.18.2 までの既存 installed 版は「自動更新できない」ロックイン、オーナー手動移行が必須
+  - GitHub Release の release.yml が `TAURI_SIGNING_PRIVATE_KEY` Secret 不在だと build fail → dev 実装時に graceful fallback 検討（Secret 無ければ警告だけで build 続行、artifact は unsigned で release）
+
+- **関連**: DEC-059（permission UI、pubkey 将来対応と記載）、DEC-062（updater 有効化）、オーナー指示 2026-04-24
+
+---
+
+## DEC-066: ProjectRail アイコンの状態可視化強化 + プロジェクト別 accentColor（**新設 2026-04-25**）
+
+- **意思決定者**: CEO（オーナー指示）
+- **対象バージョン**: v1.20.0
+
+- **問題（4 点）**:
+  1. ProjectRail のアイコン応答中マークが**非選択プロジェクトでは消える**（選択連動の描画 bug、DEC-064 で session 側を直した同パターン）
+  2. 応答完了時のマークが**即消え**してしまう。ユーザーが該当 project を開くまで「未読」として継続表示したい
+  3. 現在「実行中」は右下ドットで表現しているが、オーナー要望で**アイコン自体の背景色で停止／実行中を可視化**したい
+  4. **プロジェクトごとにアイコン背景色を選択**可能にしたい（視覚的区別）
+
+- **内容**:
+
+  ### 1. Project 状態の volatile 集約
+  - `useProjectStore` の各 project entry に volatile status を追加:
+    - `status: "idle" | "thinking" | "streaming" | "completed" | "error"` (default `"idle"`)
+    - `hasUnread: boolean` (completed が解除されるまで true)
+    - `lastActivityAt: number | null`
+  - 集約ロジック（selector で computed）:
+    - 所属 session のいずれかが `thinking` / `streaming` なら project は同じ最優先状態
+    - 全 session idle で、**直近の session 応答完了** から project が active view で開かれるまで `completed`
+    - 該当 project を active にすると `completed` → `idle` 遷移、`hasUnread` クリア
+  - volatile、localStorage 非永続化（再起動で idle リセット）
+  - DEC-063 以降の session.status から derive、session 側の更新に連動
+
+  ### 2. Completed の継続表示（未読的挙動）
+  - session 応答完了 (`message_stop` / `result`) → 該当 session を pane で**表示していなければ** session.hasUnread=true
+  - Project 集約時、いずれかの session が hasUnread=true なら project.status=`completed`
+  - ユーザーが project を active にして該当 session pane を開くと hasUnread=false に戻る
+  - SessionList の既存アイコン（DEC-064）と整合、session でも completed 表示（Sparkles Check 等の確認アイコン）
+
+  ### 3. アイコン背景色での実行状態表現
+  - ProjectRail の project icon component を改修
+  - 旧: 右下に小さな status dot
+  - 新: **アイコン自体の背景色** を status で変化
+    - idle: accentColor（ユーザー設定色）そのまま
+    - thinking: accentColor に pulse animation（primary ring）
+    - streaming: accentColor + pulse 強め
+    - completed: accentColor + 確認アイコン overlay（未読強調）
+    - error: destructive overlay（赤系）
+  - 右下 dot は廃止、代わりにステータス overlay / ring で表現
+
+  ### 4. プロジェクト別 accentColor
+  - `useProjectStore` の ProjectRegistry 型に `accentColor: string | null` field 追加（persist）
+  - プリセット色（Tailwind tokens）: `slate` / `red` / `orange` / `amber` / `yellow` / `lime` / `green` / `emerald` / `teal` / `cyan` / `sky` / `blue` / `indigo` / `violet` / `purple` / `fuchsia` / `pink` / `rose` / `neutral`（デフォルト）
+  - 値の保存方式: Tailwind token 名（`"blue"` 等の短い文字列、CSS variables や classname で使いやすい）
+  - UI:
+    - プロジェクト右クリックメニュー or Settings > Project > Accent Color picker
+    - 色選択 popover（grid 状に 12-18 色のチップ、クリックで即適用）
+    - 既存項目「リネーム」「削除」の近くに「色を変更」アイテム追加
+  - デフォルト: `neutral`（色付けなし）、ユーザーが明示的に選ばなければ中立色
+
+- **設計判断**:
+  - status は volatile、永続化不要（再起動で idle から出発が自然）
+  - hasUnread は volatile、永続化不要（再起動時に「未読」は意味を失う、新規送信で再計算）
+  - accentColor は persist（永続化、ユーザー設定）
+  - アイコン配色は `bg-{color}-500` / `hover:bg-{color}-600` / `ring-{color}-400` の Tailwind tokens で統一
+  - ダーク/ライト theme 両対応（`dark:bg-{color}-400` 等）
+
+- **代替案と却下理由**:
+  - 「完了マーク自動消失タイマー 5 秒」: ユーザーが気づかない可能性、未読永続化が自然
+  - 「accentColor を自由 HEX 入力」: UX 複雑化、プリセット 19 色で十分
+  - 「背景色と dot 両方残す」: 視覚ノイズ過多、オーナー指示で dot を廃止し背景色に統一
+
+- **関連**: DEC-064 (session status)、DEC-063 (session-level sidecar)、オーナー指示 2026-04-25
+
+---
+
+## DEC-067: Claude 応答中の追加チャット送信 + Esc 停止（Cursor 互換 UX）（**新設 2026-04-25**）
+
+- **意思決定者**: CEO（オーナー指示）
+- **対象バージョン**: v1.21.0
+
+- **問題（2 点）**:
+  1. 現状 InputArea は Claude 応答中（thinking / streaming）に textarea / 送信ボタン両方 disabled になり、追加質問を打てない。Cursor の Claude Code は応答中でも入力でき、送信時に現応答を停止して新 turn を始められる
+  2. Esc キーで応答停止する経路が無い（現状は SessionList の停止ボタンか sidecar 終了経由のみ）。Cursor の Claude Code では Esc で即停止できる
+
+- **採用方針（案1: interrupt + 新 turn）**:
+  - SDK は streaming input mode で `streamInput()` による mid-turn injection をサポートするが、現 sidecar 実装は string prompt + AbortController 経路。streaming input mode への移行は SDK の `Query` ハンドルを sidecar 側で長期保持する必要があり、設計変更が大きい
+  - 既存の `send_agent_interrupt` Tauri command + sidecar の `handleInterrupt` (AbortController.abort()) は v3.3.1 で実装済 (DEC-059 系列の review v6 で導入)。これに依拠する形が最小実装で確実
+  - 案1 (interrupt + 新 turn): 送信時に現 query を abort → 新 prompt として送信。Cursor の挙動と外形上同等で、UX の差異は小さい
+  - 案2 (mid-turn injection): SDK streaming input mode で `streamInput({type: "user", message: ...})` を中断せず投入。現 sidecar 設計から逸脱、v1.21.0 では採用しない
+
+- **内容**:
+  ### 1. Esc 停止
+  - グローバル keydown listener を Shell に `EscapeProvider` として 1 箇所マウント
+  - `Escape` 押下 + 以下を全て満たす場合のみ `send_agent_interrupt(sessionId)` 発火:
+    - IME composition 中ではない (`event.isComposing` / `keyCode === 229` 除外)
+    - PermissionDialog が開いていない (`permission-requests.pending.length === 0`)
+    - その他の Radix Dialog (open) が DOM に無い (`[role="dialog"][data-state="open"]` 不在)
+    - active pane の current session が存在し、status が `thinking` / `streaming`
+  - modifier (Ctrl/Shift/Alt/Meta) は要求しない (Cursor 互換)
+  - status reset は sidecar からの `interrupted` event を受けて `useAllProjectsSidecarListener` が捌く既存経路を再利用
+
+  ### 2. 応答中の追加チャット送信
+  - InputArea の textarea / 送信ボタンの disabled 判定を緩和: 応答中も入力可、ボタンも有効
+  - 送信時の挙動: status が thinking/streaming なら `send_agent_interrupt` を await してから `send_agent_prompt` を呼ぶ
+  - sidecar 側の `handleInterrupt` は AbortController を全 in-flight に `abort()` する。新 prompt は同 session の handlePrompt が並列実行可能 (controller は req.id ごとに独立)
+  - 「中断中…」等の transient toast は出さない (UX を spam しない)
+
+  ### 3. UI/UX
+  - 応答中のみ「Esc で停止 / そのまま送信すると停止して新しい turn になります」のヒントを InputArea 下に表示
+  - 送信ボタンの label を状態で切替: idle 時「送信」、応答中「停止して送信」
+  - placeholder も応答中は「応答中... (Esc で停止 / 送信で停止して新しい turn)」に変更
+
+- **設計判断**:
+  - sidecar 側の AbortController は req.id ごとの Map で管理されており、interrupt 時は当該 session の全 in-flight を一括 abort できる (sidecar は session 単位起動なので 1 session = 1 sidecar = 高々 1 in-flight が通常)
+  - Rust 側 `send_agent_interrupt` は既に存在 (commands/agent.rs)。新規追加は不要
+  - グローバル listener は `window.addEventListener("keydown")` で bubble phase listen し、Radix Dialog (Permission/Update) 自身の Esc=close ハンドラを尊重
+  - permission_request 中の Esc は dialog 側の deny ハンドラ優先 (PermissionDialog の既存挙動)
+  - InputArea 内 SlashPalette / AtMentionPicker open 中の Esc は palette close 優先 (e.preventDefault() 後に bubble するが、グローバル handler は `e.defaultPrevented` を見て no-op)
+
+- **代替案と却下理由**:
+  - **案2 (mid-turn injection)**: SDK の streaming input mode は `prompt: AsyncIterable<SDKUserMessage>` を要求。sidecar の handlePrompt は string prompt の `for await (const ev of runAgentQuery(...))` 構造で、AsyncGenerator の制御権は SDK 内部にある。mid-turn injection を真にサポートするには `Query` ハンドルを保持し `query.streamInput()` を呼ぶ別コードパスが要る。v1.21.0 では UX 同等の案1 で出荷し、案2 は将来の改善候補とする
+  - **送信時 toast 表示**: 「中断して送信中...」を出すと UX が冗長。interrupt の Promise を await するだけで体感遅延は最小化される
+  - **Esc に modifier 要求 (Ctrl+Esc 等)**: Cursor 互換性の損失、UX 後退。modifier 無しで採用
+
+- **関連**: DEC-063 (session-level sidecar)、DEC-059 (permission dialog)、v3.3.1 review v6 Should Fix S-2 (interrupt 既存実装)、オーナー指示 2026-04-25
+
+---
+
+## DEC-068: permissionMode を実装と説明文で整合化、allowedTools を動的構成（DEC-059 改訂）（**新設 2026-04-25**）
+
+- **意思決定者**: CEO（オーナー指示 + 仕様矛盾の根治）
+- **対象バージョン**: v1.22.0
+- **問題**:
+  - 現状 `sidecar/src/index.ts:529-540` が `allowedTools: ["Read","Edit","Write","Bash","Glob","Grep","WebSearch","WebFetch","TodoWrite","NotebookEdit"]` を **永続的に許可**
+  - `permissionMode: "default"` でも Edit / Write / Bash 等が **無確認実行** されてしまう
+  - TrayPermissionModePicker の説明文「標準: **編集ごとに確認を求める**」と完全矛盾
+  - DEC-059 案A は「便利さ優先」で導入したが、permissionMode 仕様と整合していなかった
+
+- **内容**: permission mode に応じて allowedTools を **動的構成**
+
+  | Mode | UI 説明 | allowedTools 動的構成 | 挙動 |
+  |---|---|---|---|
+  | `default` | 編集ごとに確認を求める | `Read, Glob, Grep, WebSearch, WebFetch` のみ | 編集系は canUseTool で都度承認 |
+  | `acceptEdits` | 編集を自動で承認 | `Read, Glob, Grep, WebSearch, WebFetch, Edit, Write, NotebookEdit, TodoWrite, Bash` | 全自動許可 |
+  | `bypassPermissions` | 全操作を許可 | 全許可 | 全自動 |
+  | `plan` | 提案のみ、ファイル変更なし | `Read, Glob, Grep, WebSearch, WebFetch` | 書込系は SDK が plan mode で block |
+
+- **設計判断**:
+  - 公式 Claude Code SDK 仕様（`default`=都度確認、`acceptEdits`=編集自動承認）に整合
+  - readonly tool は全 mode で許可（情報取得は permission を求めない）
+  - 編集系は `acceptEdits` / `bypassPermissions` でのみ自動許可
+  - `default` モードでは編集系は canUseTool で dialog 経由（DEC-059 案B の UI を活用）
+  - 呼び出し側が options.allowedTools を明示指定したらそちらを優先
+
+- **影響範囲**:
+  - sidecar/src/index.ts の allowedTools 構築ロジックを mode 連動に
+  - 既存「標準」モード使用中の session で、次回送信から編集系操作で permission dialog が出る（破壊的だが期待通り）
+
+- **関連**: DEC-053、DEC-059、オーナー指示 2026-04-25
+
+---
+
+## DEC-069: localhost サーバー管理機能（Phase 1 MVP）（**新設 2026-04-25**）
+
+- **意思決定者**: CEO（オーナー指示）
+- **対象バージョン**: v1.23.0
+- **背景**: Sumi 内蔵ターミナルや外部で起動した localhost サーバーを Sumi UI で確認・kill したい要望
+- **内容（Phase 1 MVP）**:
+  1. Rust commands: `list_local_servers()` / `kill_local_server(pid, force)`
+  2. crates: `sysinfo` (プロセス情報 + kill) + `netstat2` (port→pid マッピング)
+  3. Frontend: `components/sidebar/LocalServersPanel.tsx` を sidebar の新 tab として追加
+  4. 5 秒 polling、tab 非アクティブ時は停止
+  5. kill は AlertDialog で destructive 確認
+  6. Sumi 自身のプロセスは kill 候補から除外
+  7. LISTEN のみ表示、TIME_WAIT / CLOSE_WAIT は除外
+  8. IPv4 / IPv6 同 pid は 1 行に集約
+
+- **採用案**: sidebar tab（常時参照可能、StatusBar からの dialog より UX 上優位）
+- **後続フェーズ（候補）**:
+  - Phase 2 (v1.24): Preview との双方向連携、Sumi 由来プロセス識別
+  - Phase 3 (v1.25+): lineage 追跡、health check、起動履歴
+
+- **関連**: オーナー指示 2026-04-25
+
+---
+
+## DEC-070: `/chrome` ブラウザ操作機能の Sumi 統合（Phase 1）（**新設 2026-04-25**）
+
+- **意思決定者**: CEO（オーナー指示）
+- **対象バージョン**: v1.24.0
+- **背景**:
+  - Anthropic 公式 Claude Code CLI の `--chrome` / `/chrome` 機能（ベータ）を Sumi に統合
+  - 公式 docs: https://code.claude.com/docs/ja/chrome
+  - オーナー環境: CLI 2.1.113（要件 2.0.73+ クリア）、Claude Max OAuth、Windows native（WSL 不可は影響なし）
+  - 既存 Chrome 拡張「Claude in Chrome」と Native Messaging Host 経由で接続、組み込み MCP `claude-in-chrome` でブラウザ操作 tool を提供
+
+- **内容（Phase 1 MVP）**:
+  1. **`/chrome` slash command** を Sumi SlashPalette built-in に登録
+     - 入力 → SDK に通常 prompt として送信（CLI 仕様に乗る、最軽量実装）
+     - 説明文「Chrome 接続のステータス確認・有効化・再接続」
+  2. **Settings に「ブラウザ操作」セクション**
+     - 「Chrome 拡張をインストール」ボタン → chromewebstore を外部ブラウザで開く
+     - 「**Chrome デフォルト ON**」toggle（**既定 OFF**、context 節約）→ ON で sidecar の query options に `extraArgs: { chrome: null }` を session ごとに付与
+     - CLI version 自動検知（`claude --version` を spawn）→ 2.0.73 未満なら warning
+     - 接続ステータス表示（拡張検知 / Native Messaging Host 確認）
+     - ヘルプ「`/chrome` でいつでも接続管理できます」
+  3. **エラー UX**
+     - 「Browser extension is not connected」「Extension not detected」「No tab available」「Receiving end does not exist」を日本語に翻訳して toast 表示
+     - 「拡張をインストール」「Chrome を再起動」等の具体 CTA を併記
+     - v1.22.6 の sidecar stderr toast filter と整合
+
+- **設計判断**:
+  - **既定 OFF**: 公式 docs が context 消費増を警告、オーナー要望で「都度 `/chrome` で有効化」が UX 上自然
+  - **公式既定 profile（Cookie 共有）尊重**: 公式機能の利便性（Gmail/Notion/Slack 等のログイン状態共有）を最優先、isolated profile はオーナーが望めば Phase 2 でオプトイン
+  - **`extraArgs: { chrome: null }` を session 単位で付与**: DEC-053/057 の session-preferences パターンに統合（chromeEnabled: boolean を追加）
+  - **chrome-devtools-mcp / playwright-mcp 併用は Phase 2**: `/chrome` 公式単体で Phase 1 出荷、third-party MCP は別途
+  - **TrayBar UI 追加は Phase 2**: Phase 1 は SlashPalette + Settings のみ、CLI 実機検証後に UX 改善
+
+- **実装範囲**:
+  - 新規: `components/settings/BrowserAutomationSection.tsx`（Settings の新セクション）
+  - 修正: `lib/builtin-slash.ts`（`/chrome` 追加）, `lib/stores/session-preferences.ts`（`chromeEnabled` 追加）, `sidecar/src/index.ts`（chromeEnabled→`extraArgs` マッピング）, `src-tauri/src/commands/agent.rs`（options pass-through 確認）, `hooks/useAllProjectsSidecarListener.ts`（browser エラー日本語化）
+  - 非対応: chrome-devtools-mcp / playwright-mcp 統合 UI / Live View / domain ホワイトリスト（Phase 2 以降）
+
+- **関連**: DEC-053（session-preferences）、DEC-057（perProject sticky）、DEC-068（permissionMode）、オーナー指示 2026-04-25
+
+---
+
+## DEC-071: 応答テキスト中間欠落の根治 — last-write-wins 化（**新設 2026-04-28**）
+
+- **意思決定者**: CEO（オーナー指示「Option A で進めてください」）
+- **対象バージョン**: v1.31.2
+- **背景**:
+  - オーナーが「sumi の応答が稀に一部欠落する」現象を 2026-04-28 に報告、添付スクショで再現確認
+  - 現象: 文の塊単位で中間が消え、引用符が壊れた状態（例「sync-h-to-web.sh で improver-web へ反映しま」→ 唐突に「ット" として残っている」に飛ぶ）が表示される
+  - 改行 / 文字境界破損ではなく、明らかに sentence chunk 単位で消失 → reducer の delta 計算ミスを最有力仮説として CEO が判断
+
+- **原因（CEO 判定）**:
+  - `hooks/useAllProjectsSidecarListener.ts` の assistant event 処理が
+    `text.slice(existed.content.length)` という **prefix-extension 前提** で
+    delta を抽出していた
+  - Claude Agent SDK の assistant event は内部で text block を分裂・再結合・
+    thinking 挿入で再構成することがあり、`extractText` が `\n` join した結果が:
+    - **累積長が前回より短くなる** → 以降 slice() が空文字 → 中間欠落
+    - **prefix が一致しない** → 重複 / 文字化け
+  - これが構造的バグであることを `extractText` 実装と SDK の content array 仕様
+    から確証
+
+- **判断**:
+  - **last-write-wins** で content を完全置換する方式に切り替える
+  - sidecar 側 (Rust buffer / Tauri emit) の遡及調査は見送り、frontend reducer
+    だけで現象を吸収できるかをまず確認（Option A: 観測 + 軽量防御）
+  - 観測ログで non-monotonic 更新を warn 化し、再発 / 別原因の場合の現場証拠を残す
+
+- **実装**:
+  1. `lib/stores/chat.ts`: `replaceStreamingMessage(sessionId, id, content)` を新規追加
+  2. `hooks/useAllProjectsSidecarListener.ts`: assistant event の delta append を
+     完全置換に切替、`prevLen / newLen / isShrink / prefixOk / prevTail / newTail`
+     を console.warn (anomaly) / logger.debug (正常) で記録
+
+- **設計判断**:
+  - 既存の rendering 経路は `m.content` を読むだけで破壊的変更なし
+  - DB 永続化は finalizeStreamingMessage 経由で最終状態のみ書き込むため
+    last-write-wins と相性が良い
+  - 観測 warn は production にも残す（再現が稀で短期 dogfood では掴みきれないため）
+
+- **関連**: DEC-064（session 単位 message store）、DEC-063（session-level sidecar）、
+  オーナー指示 2026-04-28
+
+---
+
+## DEC-072: Session 単位の起動/停止 UI 露出 + 起動数可視化 + プロジェクト並び替え（**新設 2026-04-28**）
+
+- **意思決定者**: CEO（オーナー指示「各セッションの起動停止を別々に行えるようにしたい」）
+- **対象バージョン**: v1.32.0
+- **背景**:
+  - DEC-063 (v1.17.0) で **1 session = 1 sidecar (Claude プロセス)** に正式昇格済み
+  - しかし UI は project 単位の一括起動/停止しか提供しておらず、TitleBar の
+    「停止」ボタンは project 内の全 session sidecar を kill する設計だった
+  - オーナーは「必要な session だけ起動して総 RAM 消費を抑えたい」「起動して
+    いる Claude の合計を可視化したい」「session ごとの起動/停止状態を視覚的に
+    把握したい」「project 並び順を変更したい」を要望（2026-04-28）
+
+- **判断**:
+  - frontend のみで完結する（Rust 側は `start_agent_sidecar` / `stop_agent_sidecar` /
+    `list_active_sidecars` の session 単位 API がすでに揃っている）
+  - **active-sidecars store** を新設し、`list_active_sidecars` を 5 秒間隔で
+    poll して Rust を source of truth とする一元管理にする
+  - **UI 露出は SessionList の DropdownMenu に「Claude を起動 / 停止」項目を追加**
+    する形で控えめに（誤操作防止 + 既存 UX を破壊しない）
+  - **state dot は session 行右側に常時表示**（緑=起動中 / 灰=停止中）
+  - **StatusBar の "N sidecars" は session 単位カウントに改修**、tooltip でも
+    session タイトル（project 名）を列挙
+  - **ProjectRail の並び替え** は `@dnd-kit/sortable` で実装、PointerSensor の
+    activationConstraint=8 でクリック選択 / 右クリックメニューと両立
+
+- **実装**:
+  1. **新規 `lib/stores/active-sidecars.ts`**: `Record<sessionId, SidecarInfo>` を保持
+     する Zustand store。`refresh()` / `markStarted` / `markStopped` / `isRunning`
+     を提供。persist しない（プロセス終了で sidecar 全 kill されるため）
+  2. **新規 `hooks/useActiveSidecarsPoll.ts`**: 5 秒間隔 polling hook、Shell から
+     1 回マウント
+  3. **新規 `lib/session-sidecar.ts`**: `startSessionSidecar(sessionId, projectId)` /
+     `stopSessionSidecar(sessionId)` の薄い wrapper。InputArea の send 経路と
+     整合する model / effort 解決ロジックを内包
+  4. **`components/sidebar/SessionList.tsx`**: SessionItem に sidecar 状態 dot +
+     DropdownMenu の「Claude を起動 / 停止」項目を追加。session_id を Set 化して
+     Map lookup を高速化
+  5. **`components/layout/StatusBar.tsx`**: ActiveSidecarsIndicator を session 単位
+     カウントに改修。tooltip も session タイトル + project 名で再構成
+  6. **`components/layout/ProjectRail.tsx`**: SortableContext + SortableProjectRailItem
+     で並び替え対応、`reorderProjects` action を project store に追加
+  7. **`lib/stores/project.ts`**: `reorderProjects(fromIndex, toIndex)` を追加。
+     persist 経由で localStorage に保存
+
+- **設計判断**:
+  - **polling 間隔 5 秒**: Rust HashMap lookup は <1ms、毎秒だと不要負荷、10 秒
+    だと操作直後の UI 反映が遅い。操作直後は明示 refresh で間 polling 待ちを排除
+  - **state dot の click 起動は採用しない**: 誤操作（session 切替時に dot を
+    踏んで停止）を防ぐため、起動/停止操作は DropdownMenu 経由のみ
+  - **TitleBar の「停止」は変更しない**: project 単位の「全部停止」は緊急停止
+    用途として価値があり、既存挙動を維持。UI に「ここは project 単位 / SessionList
+    は session 単位」の二段構成が成立する
+  - **ProjectRail D&D distance=8**: SessionList の 4 だと右クリックメニュー誤発火
+    が起きやすいため、icon 主体の rail はやや厳しめに
+
+- **関連**: DEC-063（session-level sidecar）、DEC-066（ProjectRail status）、
+  PM-983（session 並び替え）、オーナー指示 2026-04-28
+
+---
+
 ## 今後の決定候補（v3.4 路線で更新）
 
 - **DEC-035**: monorepo 採用有無（M2 以降、複数パッケージが必要になった時点）
