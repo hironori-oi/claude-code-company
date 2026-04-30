@@ -1,6 +1,7 @@
-# Keybinding アーキテクチャ (PRJ-012 v1.38.0 / DEC-078)
+# Keybinding アーキテクチャ (PRJ-012 v1.38.0 → v1.40.0 / DEC-078)
 
 > 起源: PRJ-012 sumi v1.38.0 (2026-05-01) / Phase 1 実装
+> 最終更新: PRJ-012 sumi v1.40.0 (2026-05-01) / Phase 2 完成
 > ベース提案: `projects/PRJ-012/reports/dev_keybinding_editor_proposal.md` (案 C ハイブリッド)
 
 中央 registry + ユーザー override 方式のキーバインド設計指針。Tauri / Electron 系
@@ -53,17 +54,32 @@ read-only の hardcode から脱したい」中規模アプリの実用解。
 
 ### 1-C. context 分類 (4 種)
 
-| context     | 有効スコープ                          | Phase 1 / 2 |
-| ----------- | ------------------------------------- | ----------- |
-| `global`    | アプリ全域 (focus 不問)               | Phase 1 ◯   |
-| `chatInput` | chat textarea にフォーカス時          | Phase 2     |
-| `terminal`  | xterm canvas にフォーカス時           | Phase 2     |
-| `editor`    | Monaco エディタ内 (Monaco 内部委譲)   | Phase 3+    |
+| context     | 有効スコープ                          | Phase 1 / 2 / 3 |
+| ----------- | ------------------------------------- | --------------- |
+| `global`    | アプリ全域 (focus 不問)               | Phase 1 ◯       |
+| `chatInput` | chat textarea にフォーカス時          | Phase 2 ◯       |
+| `terminal`  | xterm canvas にフォーカス時           | Phase 2 ◯       |
+| `editor`    | Monaco エディタ内 (Monaco 内部委譲)   | Phase 3+        |
 
 Phase 1 は context 判定 (`isContextActive`) を実装せず、`useBoundCallback` は
-**常に window で listen** する制約付き。registry 上は context フィールドを
-正しく設定し、Phase 2 で context evaluator を入れる時に hook 側だけ書き換えれば
-binding 側 (registry / 各 component) は無変更で済む設計。
+**常に window で listen** する制約付きだった。Phase 2 (v1.40.0) で `lib/keymap/
+context.ts` に `isContextActive(ctx, event)` を追加し、`useBoundCallback` 内で
+event.target を `closest()` で見て context active 判定を入れた。
+
+#### Phase 2 で導入した focus marker
+
+context 判定は `event.target` の `closest()` で行う。各 component で marker
+属性を付与する:
+
+| context     | marker (closest 検索 selector)                          | 付与場所                           |
+| ----------- | ------------------------------------------------------- | ---------------------------------- |
+| `chatInput` | `textarea[data-chat-input]` / `[data-chat-input]`       | `components/chat/InputArea.tsx`    |
+| `terminal`  | `[data-terminal-pane]` / `.xterm-helper-textarea` / `.xterm` / `[role="application"][aria-label="ターミナル"]` | `components/terminal/TerminalPane.tsx` |
+| `editor`    | (Phase 3 で実装)                                         | -                                  |
+
+新規 binding を追加する場合、対応する component に上記 marker を付与しないと
+`isContextActive(ctx, event)` が常に false を返して binding が発火しない。
+逆に marker を付ければ既存 listener には変更なしで context-aware 化される。
 
 ### 1-D. Mod プレースホルダ
 
@@ -101,11 +117,37 @@ if (parsed.mod !== modPressed) return false;
 ### 注意点
 
 - `defaultAccel: null` も許容。「registry に登録だけして override 待ち」できる
-  (例: `app.openHelp` は専用 hotkey 未割当だが UI の編集対象には載せたい)
-- 既存 binding と同 context + 同 accel になる場合は `detectConflicts` で warning
-  が出る。意図的な共存 (registry 内 default のみ衝突する状況) は避ける
+  (Phase 1 では `app.openHelp` がこのパターン。Phase 2 で `Mod+/` を割当)
+- 既存 binding と同 context + 同 accel になる場合は `detectConflicts` で error
+  warning が出る。意図的な共存 (例: `palette.search` global と `terminal.search`
+  terminal で同じ Mod+Shift+F) は context が違えば warning 止まりで許容
 - IME 変換中 (`isComposing` / `keyCode === 229`) の guard は `useBoundCallback`
   内で **自動的に** 行われる。component 側で書く必要なし
+
+### context 判定基準 (Phase 2 で確定)
+
+新規 binding の context をどれにするかの判定基準:
+
+| 状況 | context |
+| ----------------------------------------------- | ------------- |
+| アプリ全域で発火させたい (どの focus でも有効)  | `global`      |
+| chat textarea focus 時のみ発火                   | `chatInput`   |
+| xterm canvas focus 時のみ発火                    | `terminal`    |
+| Monaco editor focus 時のみ発火                   | `editor` (Phase 3+) |
+
+迷ったら **global にする方が UX 上の事故は少ない** (Cursor 移行ユーザーは
+focus を意識せず操作するため)。terminal 系は xterm.js が文字入力として食って
+しまうので必ず terminal 化する必要がある。
+
+### 新規 binding 追加時の注意 (Phase 2 で追加)
+
+- terminal binding を追加した場合、TerminalPane.tsx の `dispatchTerminalAction`
+  switch に対応 case を追加する (registry に id を追加するだけでは local 操作が
+  発火しない、xterm.js は React hook を呼べない都合)
+- chatInput binding を追加した場合、対応する component (textarea を持つ要素) で
+  `data-chat-input` 属性が closest で見つかる位置にあるか確認する
+- `note?: string` フィールドは「ユーザーが override しても期待通り動かない」
+  ような特殊事情 (browser default と共存、固定動作等) を明示するために使う
 
 ---
 
@@ -139,36 +181,71 @@ Phase 1 = version 1 から開始。旧 key 不在のため transparent migration
 
 ---
 
-## 4. Phase 2 への引き継ぎ事項
+## 4. Phase 2 (v1.40.0) で実装した範囲 — 完了履歴
 
-### Phase 2 (v1.40.0 想定 / 4〜5 営業日) で実装する範囲
+1. **context evaluator** (`lib/keymap/context.ts` 新規)
+   - `isContextActive(ctx, event)` を実装。chatInput / terminal を `event.target`
+     の `closest()` で判定 (上記 §1-C の marker)
+   - `useBoundCallback` の `scope` option (default `"global"` で context-aware)
+     に組込まれ、registry の context が non-global なら自動で context active 時
+     のみ発火する
 
-1. **context evaluator** の実装
-   - `lib/keymap/context.ts` (新規) で 4 種 context のうちどれが現在 active か判定
-   - chat textarea / xterm canvas / Monaco の focus 状態を見る
-   - `useBoundCallback` 内で `if (!isContextActive(ctx)) return;` の guard を追加
-
-2. **InputArea の `chat.send` / `chat.pasteImage` を registry 経由化**
-   - 現状: `components/chat/InputArea.tsx` の onKeyDown 直書き
-   - 移行先: `useBoundCallback("chat.send", ..., { context: "chatInput" })`
-   - `Escape` で palette を close する分岐は registry 化しない (modal 慣例)
+2. **InputArea の `chat.send` を registry 経由化**
+   - `useKeybindingsStore` selector で `getEffectiveAccelFromState(s, "chat.send")`
+     を購読し、textarea onKeyDown 内で `matchesAccel(nativeEvent, sendAccel)` 判定
+   - `useBoundCallback` の `{ ref: ... }` scope ではなく selector 方式を選んだ理由:
+     React の onKeyDown と window listener の二重発火が起こると IME composition
+     state が壊れるため、textarea 直の onKeyDown 経路で完結させた
+   - `Shift+Enter` (改行) と `Esc` (palette/picker close) は **registry 化しない**
+     方針 (textarea native の改行 / Radix Dialog 標準の Esc-close との二重発火回避)
 
 3. **TerminalPane の `attachCustomKeyEventHandler` を registry 経由化**
-   - 現状: `components/terminal/TerminalPane.tsx` で xterm.js が直接 KeyboardEvent
-     を見る (`Ctrl+Shift+F/K/N/W/C/V/L`、`Ctrl+Tab`)
-   - 移行戦略: registry から accel を取得するだけの薄い分岐に refactor。
-     dispatch (= 実際の terminal 操作) は xterm.js の `return false` 仕様を保つため
-     local 実装のまま。**registry の id だけ統一すれば**、KeybindingsSettings
-     から terminal 系も編集可能になる
-   - 規模: 7 binding × 1 行差 = 半日程度。ただし「Ctrl+Shift+F が chat / terminal
-     どちらで動くか」の context 切替は context evaluator 完成が前提
+   - 新規 vanilla helper `findMatchingBinding(event, "terminal")` で同期的に
+     registry を引く (xterm.js は React hook を呼べない)
+   - `dispatchTerminalAction(id, term, ptyId, setSearchOpen)` で local 操作 dispatch
+   - registry 化対象 7 件: `terminal.search` / `.copy` / `.paste` / `.clear` /
+     `.newTerminal` / `.closeTerminal` / `.reset`
+   - hardcode 維持 2 件: `Ctrl+Tab` (terminal cycle、修飾単独 + Tab で textarea
+     focus 移動と紛らわしい / DEC-079 候補)、`Ctrl+V` 修飾単独 paste
+     (Cursor/VSCode 互換の固定動作、shell SIGINT 互換性のため)
 
 4. **HelpDialog のターミナルセクション**
-   - 現状: hardcode された 8 binding を表示
-   - Phase 2: registry 駆動化 (chat / palette と同じ自動生成パスに乗せる)
-   - hardcode セクションは削除
+   - registry 駆動化完了。Terminal category として「主なショートカット」内に
+     自動表示。hardcode 残置は Ctrl+Tab / Ctrl+V のみ
 
-### Phase 1 で **意図的に踏み込んでいない** 範囲
+5. **conflict 検出の severity 強化**
+   - `AccelConflict.severity = "error" | "warning"`
+   - error: 同 context 重複 (赤 icon)
+   - warning: global vs other-context (黄 icon、focus で優先順が変わる旨を tooltip)
+   - 異なる non-global context 同士は衝突報告しない (focus 排他)
+
+6. **context フィルタ UI**
+   - `KeybindingsSettings` 上部に Tabs で「すべて / Global / ChatIn / Terminal /
+     Editor」。empty state 対応
+
+### conflict resolution rule (Phase 2 で確定)
+
+```
+priority:
+  1. terminal context binding が xterm.js focus 時に最先で消費
+     (attachCustomKeyEventHandler で preventDefault + stopPropagation 後 return false)
+  2. chatInput context binding が textarea focus 時に消費 (selector 経由 or scope ref)
+  3. global binding が window listener で消費 (上記が consume せず到達した場合)
+  4. browser default (consume されなかった accel)
+```
+
+具体例:
+- `Mod+Shift+F` を terminal focus 時に押す → `terminal.search` (TerminalPane の
+  `findMatchingBinding` で消費) → SearchPalette (`palette.search`) には到達しない
+- 同 `Mod+Shift+F` を chat focus 時に押す → terminal pane の event は飛んで
+  来ないため、global の `palette.search` が window listener で消費 → SearchPalette
+  起動
+
+KeybindingsSettings の warning icon は「ユーザーが意図せず global と context-
+specific が衝突しているかも」を伝えるためのもので、上記 rule で正しく resolve
+されることは保証されている。
+
+### Phase 1 / Phase 2 で **意図的に踏み込んでいない** 範囲 (Phase 3 候補)
 
 - `react-hotkeys-hook` の依存削除 → Phase 3 検討
   - `ImagePasteZone.tsx` の `ctrl+v, meta+v` は browser default paste と共存させる
@@ -177,6 +254,9 @@ Phase 1 = version 1 から開始。旧 key 不在のため transparent migration
   → Phase 3 (overkill 寄り、保留判断あり)
 - Import / Export JSON → Phase 3
 - Tauri `plugin-store` 移行 → settings.ts と同タイミング (Phase 3)
+- `terminal.cycleTerminal` (Ctrl+Tab) の registry 化 → DEC-079 候補
+- editor (Monaco) context 統合 → Phase 3+ (Monaco 内部 binding と整合させる
+  作業が独立で重い)
 
 ---
 
