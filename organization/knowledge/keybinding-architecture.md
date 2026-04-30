@@ -1,7 +1,7 @@
-# Keybinding アーキテクチャ (PRJ-012 v1.38.0 → v1.40.0 / DEC-078)
+# Keybinding アーキテクチャ (PRJ-012 v1.38.0 → v1.41.0 / DEC-078 / DEC-079)
 
 > 起源: PRJ-012 sumi v1.38.0 (2026-05-01) / Phase 1 実装
-> 最終更新: PRJ-012 sumi v1.40.0 (2026-05-01) / Phase 2 完成
+> 最終更新: PRJ-012 sumi v1.41.0 (2026-05-01) / Phase 3a (Import/Export + Minor 4 件吸収)
 > ベース提案: `projects/PRJ-012/reports/dev_keybinding_editor_proposal.md` (案 C ハイブリッド)
 
 中央 registry + ユーザー override 方式のキーバインド設計指針。Tauri / Electron 系
@@ -247,16 +247,139 @@ specific が衝突しているかも」を伝えるためのもので、上記 r
 
 ### Phase 1 / Phase 2 で **意図的に踏み込んでいない** 範囲 (Phase 3 候補)
 
-- `react-hotkeys-hook` の依存削除 → Phase 3 検討
+- `react-hotkeys-hook` の依存削除 → Phase 3+ 検討
   - `ImagePasteZone.tsx` の `ctrl+v, meta+v` は browser default paste と共存させる
     ため registry 化対象外。react-hotkeys-hook を残しておくのが事故防止
 - custom binding 追加 (新 command id を「拡張ユーザーコマンド」として登録)
-  → Phase 3 (overkill 寄り、保留判断あり)
-- Import / Export JSON → Phase 3
-- Tauri `plugin-store` 移行 → settings.ts と同タイミング (Phase 3)
+  → v2.0.0 (overkill 寄り、保留判断あり)
+- Tauri `plugin-store` 移行 → settings.ts と同タイミング (v2.0.0)
 - `terminal.cycleTerminal` (Ctrl+Tab) の registry 化 → DEC-079 候補
 - editor (Monaco) context 統合 → Phase 3+ (Monaco 内部 binding と整合させる
   作業が独立で重い)
+- `EscapeProvider` の rename (実体は「応答停止 + 折りたたみ + ヘルプ起動 hotkey
+  provider」だが、Shell.tsx の import 互換のため Phase 2 まで保留) → v2.0.0
+  (M-Phase2-D)
+
+---
+
+## 4-A. Phase 3a (v1.41.0) で実装した範囲 — Import / Export + Minor 4 件吸収
+
+DEC-079 のレビュー指摘 Minor 5 件のうち、後方互換 + ユーザー価値高の 4 件
+(M-Phase2-A / B / C / E) を吸収。M-Phase2-D (`EscapeProvider` rename) は
+破壊的変更のため v2.0.0 へ温存。
+
+### 4-A-1. Import / Export JSON (v1.41.0)
+
+#### スキーマ仕様 (v1)
+
+```jsonc
+{
+  "schema": "sumi-keybindings",         // 固定値、validation 必須
+  "version": 1,                           // 現行 v1。将来は v2 を追加で migrate
+  "exportedAt": "2026-05-01T12:34:56Z", // ISO8601、参考情報
+  "appVersion": "1.41.0",                 // package.json の version、参考情報
+  "overrides": {
+    "chat.send": "Mod+Enter",          // string = 上書き accel
+    "palette.command": "Mod+Shift+K",
+    "app.openHelp": null                // null = 明示 unbind
+  }
+}
+```
+
+#### Validation ルール (Import 時)
+
+| 状況 | 挙動 |
+| --- | --- |
+| `schema` が一致しない | top-level throw |
+| `version` が 1 以外 | top-level throw |
+| `overrides` が object でない / 値が string\|null でない | top-level throw |
+| 個別 entry: registry に無い id | warning として記録 + 当該 entry skip、import 継続 |
+| 個別 entry: parse 不能な accel | warning として記録 + 当該 entry skip、import 継続 |
+| 個別 entry: null override | always 受理 (= 明示 unbind として保存) |
+
+「entry skip + warning」を採用した理由は、registry の改廃で古い export ファイル
+が将来 schema mismatch しても **大半の entry は救える** ようにするため。
+
+#### Import モード
+
+| モード | 挙動 |
+| --- | --- |
+| `replace` (上書き) | `resetAll()` 相当 → 空から import の overrides を適用 |
+| `merge` (マージ) | 既存 override を起点に上書き / 追加。import に無い既存 override は維持 |
+| キャンセル | 何もしない |
+
+UI (`KeybindingsSettings.tsx`) は shadcn `AlertDialog` で 3 択を提示。各ボタンに
+`data-testid="import-replace"` / `import-merge"` / `import-cancel"` を付与し
+E2E から識別可能。
+
+#### Tauri / Web fallback
+
+- Tauri 環境: `@tauri-apps/plugin-dialog` の `save()` / `open()` でファイル選択、
+  `@tauri-apps/plugin-fs` の `writeTextFile` / `readTextFile` で I/O
+- Web (Next.js dev / static export browser): `window.__TAURI_INTERNALS__` が
+  存在しないため Import / Export ボタンを **disabled**、shadcn Tooltip で
+  「Tauri 環境でのみ利用可能です」と表示
+
+純粋関数層 (`lib/keymap/import-export.ts`) は I/O 抜きで vitest 可能。
+`buildExportPayload` / `parseImportPayload` / `applyImport` の 3 つを export。
+
+### 4-A-2. `useBoundCallback` の `scope: "auto"` rename (M-Phase2-A)
+
+| 旧名 | 新名 | 後方互換 |
+| --- | --- | --- |
+| `"global"` | `"auto"` | `"global"` は **deprecated alias として残置**、v2.0.0 で削除予定 |
+
+挙動 (window で listen + registry の context が non-global なら自動で context
+active 時のみ発火) は同じ。命名と挙動の乖離 (「global なのに contextOnly 相当」)
+を解消することが目的。`KeyScope` 型に `@deprecated` JSDoc を付与。
+
+### 4-A-3. ref scope の動的解決 (M-Phase2-B)
+
+旧実装: `useEffect` 内で `ref.current` を 1 度だけ読む → mount 後 attach さ
+れる ref では永遠に null のまま listener 不発。
+
+新実装: `useEffect` 内で `tryAttach()` を即時 + `requestAnimationFrame` 1 度。
+mount 後の commit-then-attach パターン (next frame で ref が attach される)
+を救済。永久 poll は避け 1 frame に留める (慣例の `useLayoutEffect` 相当のタイ
+ミングを担保)。
+
+### 4-A-4. context フィルタ状態の永続化 (M-Phase2-C)
+
+`KeybindingsSettings` の Tabs 選択状態を新 store `useKeymapUiStore`
+(localStorage key `sumi:keymap-ui-state`) に保存。**keymap 設定本体
+(`sumi:keybindings`) とは別 store** にして、export/import の対象に含めない。
+
+| key | shape | 用途 |
+| --- | --- | --- |
+| `sumi:keybindings` | `{ overrides: Record<id, accel\|null>, version }` | 設定本体 (export/import の対象) |
+| `sumi:keymap-ui-state` | `{ contextFilter: "all" \| KeyContext, version }` | UI 操作履歴 (export/import 対象外) |
+
+SSR / hydration mismatch を避けるため初回 render は default `"all"`、mount 後
+に store 値で再 render する 2 段構成。
+
+### 4-A-5. `terminal.reset` の dispatch 一本化 (M-Phase2-E)
+
+旧実装は `dispatchTerminalAction` の `case "terminal.reset"` が **noop** で、
+別途 `container.addEventListener("keydown")` で Ctrl+Shift+L を hardcode 監視
+し `resetFn()` を呼んでいた。これにより:
+
+- ユーザーが `terminal.reset` を override しても旧 hardcode 経路が常に発火
+- 二重経路の preventDefault / stopPropagation の優先順が読みづらい
+
+新実装: `resetFnRef` を ref で保持し、`dispatchTerminalAction("terminal.reset",
+..., resetFnRef)` で直接呼び出す。container 側の hardcode listener は撤去。
+override 時の挙動が registry 経由で一貫する。
+
+### 4-A-6. v2.0.0 へ温存した項目
+
+- **M-Phase2-D**: `EscapeProvider` の rename (実体は「応答停止 + 折りたたみ +
+  ヘルプ起動 hotkey provider」)。Shell.tsx の import 互換を保つため、破壊的
+  変更として v2.0.0 で実施
+- `react-hotkeys-hook` の依存削除 (ImagePasteZone の特殊事情整理が前提)
+- `plugin-store` 移行 (settings.ts と同タイミング)
+- when 句 DSL
+- custom binding 追加
+- `KeyScope` 型から `"global"` alias を削除 (deprecation 完了)
 
 ---
 
