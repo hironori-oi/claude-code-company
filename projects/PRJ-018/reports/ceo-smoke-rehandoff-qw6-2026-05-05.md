@@ -196,6 +196,33 @@ FAIL 時は AS-HOTFIX-QW7 起票 → 真因分析 → Dev (Yuto) 派遣 → 再 
 
 DEC-018-047 厳守事項 ⓖ により、CEO smoke 単独では完成宣言できない。オーナー smoke PASS が必須。
 
+### 6.1. ★NEW★ FAIL 時の必須一発診断 (AS-CLEAN-18, 2026-05-05 追加)
+
+FAIL シナリオを問わず **必ず** 以下を実行して zip を CEO に共有してください:
+
+```powershell
+cd C:\Users\hiron\Desktop\claude-code-company\projects\PRJ-018\app\asagi-app
+pwsh scripts\asagi-diagnostic-bundle.ps1
+# → ~/.asagi/diagnostic-bundle-yyyyMMdd-HHmmss.zip 生成
+```
+
+**収集される情報** (全て **PII safe**):
+- `~/.asagi/` 配下の全ファイル inventory (size + mtime + 先頭 256 byte hex)
+- `~/.asagi/history.db` の SQLite header parse (magic / pageSize / schemaCookie / textEncoding / pageCount + 自動診断: OK/STALE/ABNORMAL)
+- `~/.asagi/store.json` の **keys のみ** (values は redacted)
+- `~/.codex/auth.json` の **存在 + size + mtime のみ** (内容は読まない)
+- Codex CLI version (0.128.0 整合確認)
+- cargo / rustc / node / pnpm version (toolchain mismatch 検出)
+- `lint-execute-batch.ps1 -Strict` 実行結果 (同型バグ blacklist 違反検出)
+- OS info (Win11 build / RAM / disk)
+- `ASAGI_*` 環境変数 + `RUST_LOG`
+
+**漏洩しない情報**: history.db のデータ / store.json の values / auth.json の中身 / keyring entry の値 / git history。
+
+**例**: AS-HOTFIX-QW5 で観測された「4096 byte / schema 0 / encoding 0 / unknown」状態は本 script で `STALE: empty SQLite file (schema 0, encoding 0) -- AS-HOTFIX-QW5 reproducer pattern` と一発判定される。CEO/Dev 側で「ファイル何バイト?」「PRAGMA 何返した?」の Q&A 往復がゼロ化。
+
+zip を Slack / メール / GitHub Issue 添付で CEO へ共有 → 解析時間 **30 分 → 5 分** に短縮目標。
+
 ## 7. 連絡事項
 
 - **commit `7d488f5`** (asagi-app) は origin/main に push 済 (本依頼書発行時点)
